@@ -28,7 +28,7 @@ use crate::tile::PropKind;
 #[cfg(any(test, feature = "__private"))]
 use crate::tile::TileLayer;
 #[cfg(feature = "unstable-v2")]
-use crate::tile::{MValue, NestedKind, NestedValue, PropValue};
+use crate::tile::{MValue, MValueScope, NestedKind, NestedValue, PropValue};
 
 #[cfg(any(test, feature = "__private"))]
 impl StagedLayer {
@@ -170,11 +170,12 @@ pub(crate) fn stage_layer(
 fn build_m_values(source: &impl LayerSource, order: &Order) -> Vec<StagedMValue> {
     /// Gather one column, naming the run and the staged column that hold its kind of values.
     macro_rules! column {
-        ($index:expr, $variant:ident) => {{
-            let (presence, values) = take_column(source, order, $index, |m_value| match m_value {
-                MValue::$variant(run) => Some(run.as_deref()),
-                _ => None,
-            });
+        ($index:expr, $scope:expr, $variant:ident) => {{
+            let (presence, values) =
+                take_column(source, order, $index, $scope, |m_value| match m_value {
+                    MValue::$variant(run) => Some(run.as_deref()),
+                    _ => None,
+                });
             (presence, StagedValues::$variant(values))
         }};
     }
@@ -187,17 +188,22 @@ fn build_m_values(source: &impl LayerSource, order: &Order) -> Vec<StagedMValue>
         .zip(layout.m_value_kinds)
         .enumerate()
     {
+        let scope = layout
+            .m_value_scopes
+            .get(index)
+            .copied()
+            .unwrap_or_default();
         let (presence, values) = match kind {
-            PropKind::Bool => column!(index, Bool),
-            PropKind::I8 => column!(index, I8),
-            PropKind::U8 => column!(index, U8),
-            PropKind::I32 => column!(index, I32),
-            PropKind::U32 => column!(index, U32),
-            PropKind::I64 => column!(index, I64),
-            PropKind::U64 => column!(index, U64),
-            PropKind::F32 => column!(index, F32),
-            PropKind::F64 => column!(index, F64),
-            PropKind::Str => column!(index, Str),
+            PropKind::Bool => column!(index, scope, Bool),
+            PropKind::I8 => column!(index, scope, I8),
+            PropKind::U8 => column!(index, scope, U8),
+            PropKind::I32 => column!(index, scope, I32),
+            PropKind::U32 => column!(index, scope, U32),
+            PropKind::I64 => column!(index, scope, I64),
+            PropKind::U64 => column!(index, scope, U64),
+            PropKind::F32 => column!(index, scope, F32),
+            PropKind::F64 => column!(index, scope, F64),
+            PropKind::Str => column!(index, scope, Str),
         };
         // A column no feature is null on needs no mask at all.
         let presence = if presence.iter().all(|&p| p) {
@@ -205,7 +211,10 @@ fn build_m_values(source: &impl LayerSource, order: &Order) -> Vec<StagedMValue>
         } else {
             Some(presence)
         };
-        columns.push(StagedMValue::new(name.clone(), presence, values));
+        columns.push(StagedMValue {
+            scope,
+            ..StagedMValue::new(name.clone(), presence, values)
+        });
     }
     columns
 }
@@ -214,12 +223,14 @@ fn build_m_values(source: &impl LayerSource, order: &Order) -> Vec<StagedMValue>
 /// values themselves, flat.
 ///
 /// `run` projects a feature's value to its run of `T`, and is [`None`] only for a
-/// value of another kind, which a source never holds.
+/// value of another kind, which a source never holds. Vertex-scoped values follow
+/// the vertices when winding moves them; triangle-scoped ones stay as given.
 #[cfg(feature = "unstable-v2")]
 fn take_column<T: Clone>(
     source: &impl LayerSource,
     order: &Order,
     index: usize,
+    scope: MValueScope,
     run: fn(&MValue) -> Option<Option<&[T]>>,
 ) -> (Vec<bool>, Vec<T>) {
     let mut presence = Vec::with_capacity(source.feature_count());
@@ -232,7 +243,11 @@ fn take_column<T: Clone>(
         let run = run(m_value).expect("m-value kind matches its column");
         presence.push(run.is_some());
         let run = run.unwrap_or_default();
-        match source.vertex_order(f) {
+        let moved = match scope {
+            MValueScope::Vertex => source.vertex_order(f),
+            MValueScope::Triangle => None,
+        };
+        match moved {
             Some(moved) if moved.len() == run.len() => {
                 values.extend(moved.iter().map(|&i| run[i].clone()));
             }

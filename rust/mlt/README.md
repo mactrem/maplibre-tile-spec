@@ -7,7 +7,7 @@ The `mlt` binary provides several commands for working with MLT files:
 * **`dump`** - Parse an MLT file and dump raw layer data without decoding
 * **`decode`** - Parse an MLT file, decode all layers, and dump the result (supports text and `GeoJSON` output)
 * **`hexdump`** - Annotated byte/bit-level hexdump of an MLT file's metadata and stream payloads
-* **`convert`** - Convert MVT or MLT tile files and MVT `.mbtiles`/`.pmtiles` archives to MLT, or tile a `GeoJSON` file, including 3D positions, into MLT files
+* **`convert`** - Convert MVT or MLT tile files and MVT `.mbtiles`/`.pmtiles` archives to MLT, or tile a `GeoJSON` file, including 3D positions, or `CityGML` buildings into MLT files
 * **`ui`** - Interactive terminal visualizer for MLT files
 
 ### Format conversion
@@ -59,6 +59,25 @@ a power of ten in metres from `-3` (1 mm) to `4` (10 km):
 ```bash
 mlt convert power_lines.geojson tiles --mlt-version 2 --max-zoom 14 --z-step -1
 ```
+
+### Tiling buildings
+
+`convert` also tiles the buildings of a `CityGML` 2.0 or 3.0 `.gml` file, or of a directory of
+them, into a directory of `z/x/y.mlt` tiles with one layer of the `Meshes` layout of
+[`docs/specification/v2.md`](../../docs/specification/v2.md#meshes). Like a `GeoJSON` input, it
+needs `--mlt-version 2` and `--max-zoom`, and takes `--min-zoom` (0), `--layer` (the input's file
+name) and `--z-step`:
+
+```bash
+mlt convert citygml/hamburg tiles --mlt-version 2 --min-zoom 14 --max-zoom 16
+```
+
+Each building, bridge or tunnel becomes one feature at the highest LOD of each of its parts,
+reprojected from the file's `srsName`. A building is stored whole, in the tile of each zoom that
+holds the centre of its bounding box. Its z values are the height above its lowest vertex, on a
+1 cm grid unless `--z-step` says otherwise, and each triangle carries the `part` m-value (wall,
+roof, ground, window or door), so surfaces of different parts share their vertices. Each feature
+has the building's `gml_id` property. `--verify` does not compare meshes and is rejected.
 
 ### Visualizer
 

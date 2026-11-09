@@ -1623,6 +1623,16 @@ mod tests {
         3,
         VERTEX
     )]
+    #[case::xyz_finest_height(
+        vertex(VertexLogical::Xyz(ZStep::above_ground(-3).unwrap(), XyzLogical::ComponentwiseDelta), PE::VarInt, 3),
+        3,
+        VERTEX
+    )]
+    #[case::xyz_coarsest_height(
+        vertex(VertexLogical::Xyz(ZStep::above_ground(4).unwrap(), XyzLogical::ComponentwiseDelta), PE::VarInt, 3),
+        3,
+        VERTEX
+    )]
     #[case::str_plain_lengths(int(IntLogical::None, PE::VarInt, 5), 5, STR_PLAIN)]
     #[case::str_fsst_dict_codes(int(IntLogical::DeltaRle(rle(5)), PE::VarInt, 5), 5, STR_FSST_DICT)]
     fn header_roundtrip(
@@ -1860,8 +1870,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case::one_past_the_coarsest(8)]
+    #[case::one_past_the_coarsest_height(16)]
     #[case::high_bit(0x80)]
+    #[case::high_bit_above_ground(0x88)]
     fn parse_rejects_a_z_step_code_outside_the_grid_range(#[case] code: u8) {
         let buf = [0b0010_1001, 0, code];
         let err = parse_stream(&buf, VERTEX, Count02::Implied(0), &mut parser()).unwrap_err();

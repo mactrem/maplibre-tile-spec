@@ -61,7 +61,7 @@ pub(crate) use crate::decoder::{
 pub use crate::decoder::{
     Layer02, MValueColumn, MValueSpans, MValues, Nested, ParsedInterior, ParsedLayer02, ParsedLeaf,
     ParsedList, ParsedMValue, ParsedMap, ParsedNested, ParsedNode, ParsedStruct, RawInterior,
-    RawLeaf, RawList, RawMValue, RawMap, RawNested, RawNode, RawStruct,
+    RawLeaf, RawList, RawMValue, RawMValueData, RawMap, RawNested, RawNode, RawStruct,
 };
 pub use crate::errors::{MltError, MltResult};
 pub use crate::layer_writer::{FeatureWriter, LayerWriter};
@@ -70,7 +70,9 @@ pub use crate::tile::{
     TileLayer, TileLayerBuilder,
 };
 #[cfg(feature = "unstable-v2")]
-pub use crate::tile::{MValue, MValueKey, NestedKey, NestedKind, NestedValue, ZStep};
+pub use crate::tile::{
+    MValue, MValueKey, MValueScope, NestedKey, NestedKind, NestedValue, ZDatum, ZStep,
+};
 pub(crate) use crate::utils::analyze::{Analyze, StatType};
 pub(crate) use crate::utils::lazy_state::{Decode, DecodeState, Lazy, LazyParsed, Parsed};
 pub use crate::utils::{PresenceOptIter, PresentValues};

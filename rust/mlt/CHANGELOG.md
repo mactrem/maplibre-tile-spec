@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(cli)* tile `CityGML` 2.0/3.0 buildings into a directory of v2 `Meshes` tiles with `convert`
+
 ## [0.6.1](https://github.com/maplibre/maplibre-tile-spec/compare/rust-mlt-v0.6.0...rust-mlt-v0.6.1) - 2026-10-27
 
 ### Other

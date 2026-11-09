@@ -24,7 +24,7 @@ use crate::decoder::{
     NodeType02, Presence02, SharedDictKind, StreamType, ValuesColumn02,
 };
 use crate::dump::model::{BitField, BlobInfo, DecodeHint};
-use crate::tile::{MAX_NESTED_DEPTH, ZStep};
+use crate::tile::{MAX_NESTED_DEPTH, MValueScope, ZStep};
 use crate::utils::{parse_string, parse_u8, take};
 use crate::wire::{
     FloatLogical, IntEncoding, LogicalEncoding, StreamMeta, ValueKind, VertexLogical,
@@ -129,7 +129,8 @@ impl<'a> Walker<'a> {
         }
 
         if header.m_values {
-            input = self.walk_m_values02(input, counts.m_values, feature_count, &shared)?;
+            let meshes = layout.geometry == GeoLayout::Meshes;
+            input = self.walk_m_values02(input, counts.m_values, feature_count, &shared, meshes)?;
         }
 
         // A well-formed layer consumes its whole body; record any trailing bytes.
@@ -241,6 +242,7 @@ impl<'a> Walker<'a> {
             label: &format!("column[{i}]"),
             feature_count,
             shared,
+            scoped: false,
         };
         let (input, presence_count) = self.walk_column_header02(input, column, typ)?;
         let input = match nested_root02(typ.data) {
@@ -468,16 +470,18 @@ impl<'a> Walker<'a> {
         Ok(input)
     }
 
-    /// Mirror `parse_m_values`: the vertex-scoped columns that end a layer body.
+    /// Mirror `parse_m_values`: the vertex- or triangle-scoped columns that end a layer body.
     ///
-    /// Each reads what a counted column of its data type reads, over the vertex
-    /// sequence rather than the features, so none of their counts are implied.
+    /// Each reads what a counted column of its data type reads, over the vertex or
+    /// triangle sequence rather than the features, so none of their counts are implied.
+    /// In a Meshes layer each column has a scope byte after its type byte.
     fn walk_m_values02(
         &mut self,
         mut input: &'a [u8],
         count: u32,
         feature_count: u32,
         shared: &[BitVec<u8, Lsb0>],
+        meshes: bool,
     ) -> MltResult<&'a [u8]> {
         let shared_count = u8::try_from(shared.len())?;
         for i in 0..count {
@@ -489,9 +493,10 @@ impl<'a> Walker<'a> {
                 label: &format!("m_value[{i}]"),
                 feature_count,
                 shared,
+                scoped: meshes,
             };
-            // An m-value column runs over the vertices, whose count only the geometry
-            // knows, so its presence popcount says nothing about its streams, which
+            // An m-value column runs over the vertices or triangles, whose count only the
+            // geometry knows, so its presence popcount says nothing about its streams, which
             // write their own counts.
             let (rest, _) = self.walk_column_header02(input, column, typ)?;
             input = self.walk_value_streams02(rest, typ, Count02::Explicit)?;
@@ -516,6 +521,7 @@ impl<'a> Walker<'a> {
             label,
             feature_count,
             shared,
+            scoped,
         } = column;
         let shared_count = u8::try_from(shared.len())?;
         let typ_byte = typ.to_byte();
@@ -525,6 +531,20 @@ impl<'a> Walker<'a> {
             |b| format!("0x{b:02X} {:?} {:?}", typ.presence, typ.data),
             move |b| column_type_bits02(b, shared_count),
         )?;
+        let mut scope_suffix = "";
+        if scoped {
+            let byte;
+            (input, byte) = self.field(input, "scope", parse_u8, |b| {
+                Some(match MValueScope::from_byte(*b) {
+                    Ok(scope) => format!("{b} {scope:?}"),
+                    Err(_) => format!("{b} reserved"),
+                })
+            })?;
+            scope_suffix = match MValueScope::from_byte(byte)? {
+                MValueScope::Vertex => " per vertex",
+                MValueScope::Triangle => " per triangle",
+            };
+        }
 
         let mut name_suffix = String::new();
         if typ.data.has_name() {
@@ -538,7 +558,10 @@ impl<'a> Walker<'a> {
         } else {
             ""
         };
-        self.relabel(ci, format!("{label} {opt}{:?}{name_suffix}", typ.data));
+        self.relabel(
+            ci,
+            format!("{label} {opt}{:?}{name_suffix}{scope_suffix}", typ.data),
+        );
 
         // Presence is a raw LSB0 bitfield, not a stream, and counts the data.
         // A shared bitfield was already walked at the layer root, so only its
@@ -948,6 +971,8 @@ struct Column<'l> {
     feature_count: u32,
     /// The layer's shared presence bitfields, one of which the column may read.
     shared: &'l [BitVec<u8, Lsb0>],
+    /// Whether a scope byte follows the type byte, as it does for an m-value column of a Meshes layer.
+    scoped: bool,
 }
 
 /// Bit breakdown of a shared-dictionary column's type byte, whose high nibble names the

@@ -331,6 +331,7 @@ impl GeometryValues {
             return Ok(ZVertices::Range(0..0));
         }
         if self.part_offsets.is_none()
+            && self.vector_types.get(index) != Some(&GeometryType::Mesh)
             && let Some(indices) = self.index_buffer.as_deref()
         {
             let tris = self.triangle_offsets.as_deref().unwrap_or(&[]);
@@ -411,6 +412,55 @@ impl GeometryValues {
     pub fn vertex_count(&self, index: usize) -> MltResult<usize> {
         let range = self.vertex_range(index)?;
         Ok(range.end.saturating_sub(range.start))
+    }
+
+    /// How many triangles feature `index` owns when it is a [`GeometryType::Mesh`], or zero when it is not.
+    pub fn triangle_count(&self, index: usize) -> MltResult<usize> {
+        Ok(self.mesh_triangles(index)?.map_or(0, <[_]>::len))
+    }
+
+    /// The triangles of feature `index` when it is a [`GeometryType::Mesh`], or [`None`] when it is not.
+    ///
+    /// Each corner names a vertex of the whole layer, within the feature's [`Self::vertex_range`].
+    pub fn mesh_triangles(&self, index: usize) -> MltResult<Option<&[[u32; 3]]>> {
+        if self.vector_types.get(index) != Some(&GeometryType::Mesh) {
+            return Ok(None);
+        }
+        let tris = self.triangle_offsets.as_deref().unwrap_or(&[]);
+        #[expect(
+            clippy::unnecessary_lazy_evaluations,
+            reason = "an eager error is dropped on every success"
+        )]
+        let run = |i: usize| {
+            tris.get(i)
+                .map(|&t| t.into_usize())
+                .ok_or_else(|| GeometryOutOfBounds {
+                    index,
+                    field: "triangle_offsets",
+                    idx: i,
+                    len: tris.len(),
+                })
+        };
+        let run = run(index)?..run(index + 1)?;
+        let triangles = self
+            .index_buffer
+            .as_deref()
+            .unwrap_or(&[])
+            .as_chunks::<3>()
+            .0;
+        #[expect(
+            clippy::unnecessary_lazy_evaluations,
+            reason = "an eager error is dropped on every success"
+        )]
+        let run = triangles
+            .get(run.clone())
+            .ok_or_else(|| GeometryOutOfBounds {
+                index,
+                field: "index_buffer",
+                idx: run.end,
+                len: triangles.len(),
+            })?;
+        Ok(Some(run))
     }
 
     /// Build a `GeoJSON` geometry for a single feature at index `i`.
@@ -512,6 +562,7 @@ impl GeometryValues {
             .ok_or_else(|| GeometryIndexOutOfBounds(index))?;
 
         if parts.is_none()
+            && geom_type != GeometryType::Mesh
             && let Some(indices) = self.index_buffer.as_deref()
         {
             let tris = self.triangle_offsets.as_deref().unwrap_or(&[]);
@@ -589,6 +640,25 @@ impl GeometryValues {
                 let part_rng = part_range(parts, idx)?;
                 reuse(out, empty_polygon, |poly| {
                     poly_from_rings(poly, part_rng, rings)
+                })
+            }
+            GeometryType::Mesh => {
+                // A mesh's vertices are its run of the vertex stream, as a MultiPoint's are,
+                // which keeps them aligned with its z and m-values. The triangles are
+                // read separately, see `mesh_triangles`.
+                #[expect(
+                    clippy::unnecessary_lazy_evaluations,
+                    reason = "an eager error is dropped on every success"
+                )]
+                let geoms = geoms.ok_or_else(|| NoGeometryOffsets(index, geom_type))?;
+                let geom_rng = geom_range(geoms, index)?;
+                reuse(out, empty_multi_point, |points| {
+                    points.0.clear();
+                    points.0.reserve(geom_rng.len());
+                    for idx in geom_rng {
+                        points.0.push(Point(vert(idx)?));
+                    }
+                    Ok(())
                 })
             }
             GeometryType::MultiPoint => {

@@ -366,6 +366,37 @@ impl GeometryValues {
         self.tessellate_polygons(polygons, first_vertex);
     }
 
+    /// Add a mesh of `vertices` and the `triangles` between them, which name the vertices
+    /// by their index among them.
+    ///
+    /// The vertices run on from the layer's, so the triangles are stored shifted past those.
+    #[cfg(feature = "unstable-v2")]
+    pub(crate) fn push_mesh(
+        &mut self,
+        vertices: impl Iterator<Item = Coord<i32>>,
+        triangles: &[[u32; 3]],
+    ) {
+        self.vector_types.push(GeometryType::Mesh);
+        let first_vertex = self.stored_vertex_count();
+        let verts = self.vertices.get_or_insert_with(Vec::new);
+        let mut count = 0_u32;
+        for vertex in vertices {
+            verts.extend([vertex.x, vertex.y]);
+            count += 1;
+        }
+        self.push_geometry_count(count);
+
+        let offsets = self.triangle_offsets.get_or_insert_with(|| vec![0]);
+        let triangle_count = u32::try_from(triangles.len()).expect("triangle count overflow");
+        offsets.push(offsets.last().expect("offsets start at 0") + triangle_count);
+        self.index_buffer.get_or_insert_with(Vec::new).extend(
+            triangles
+                .as_flattened()
+                .iter()
+                .map(|&v| v.checked_add(first_vertex).expect("vertex index overflow")),
+        );
+    }
+
     /// Initialize and update `geometry_offsets` with a sub-geometry count.
     fn push_geometry_count(&mut self, count: u32) {
         let g = self.geometry_offsets.get_or_insert_with(Vec::new);
@@ -417,8 +448,11 @@ pub fn wound_layer(layer: &TileLayer) -> TileLayer {
             if order.len() == feature.z.len() {
                 feature.z = order.iter().map(|&i| feature.z[i]).collect();
             }
-            for m_value in &mut feature.m_values {
-                m_value.reorder(&order);
+            for (i, m_value) in feature.m_values.iter_mut().enumerate() {
+                let scope = layer.m_value_scopes.get(i).copied().unwrap_or_default();
+                if scope == crate::MValueScope::Vertex {
+                    m_value.reorder(&order);
+                }
             }
         }
         feature.geometry = wound_geometry(&feature.geometry);

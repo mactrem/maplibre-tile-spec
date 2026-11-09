@@ -639,6 +639,10 @@ pub enum GeoLayout {
     TessPolygons = 0x0C,
     /// `Types`, `GeoLengths`, `PartLengths`, `RingLengths`, `TriLengths`, `TreeSymbols`, `TreeCycles`, `Vertices`
     TessPolygonsWithOutlines = 0x0D,
+    /// `GeoLengths` (vertices per feature), `TriLengths`, `TreeSymbols`, `TreeCycles`, `(x, y, z)` `Vertices`
+    ///
+    /// Every feature is a [`GeometryType::Mesh`], which the header byte names.
+    Meshes = 0x0E,
 }
 
 /// How a v2 geometry section stores its vertices, which [`GeoLayout`] names alongside the topology.
@@ -743,6 +747,7 @@ impl GeoLayout {
                 | Self::MultiPolygons
                 | Self::MultiPolygonsDict
                 | Self::TessPolygonsWithOutlines
+                | Self::Meshes
         )
     }
 
@@ -802,7 +807,10 @@ impl GeoLayout {
     /// Whether tessellation streams (`TriLengths`, `TreeSymbols`, `TreeCycles`) are present.
     #[must_use]
     pub(crate) fn is_tess(self) -> bool {
-        matches!(self, Self::TessPolygons | Self::TessPolygonsWithOutlines)
+        matches!(
+            self,
+            Self::TessPolygons | Self::TessPolygonsWithOutlines | Self::Meshes
+        )
     }
 }
 
@@ -904,8 +912,7 @@ impl LayerHeader02 {
         )
     }
 
-    /// Read the uniform type nibble of a wire byte, rejecting the one code no
-    /// geometry type takes.
+    /// Read the uniform type nibble of a wire byte, `0x7` naming a [`GeometryType::Mesh`].
     fn parse_uniform_type(byte: u8) -> MltResult<Option<GeometryType>> {
         let (_, nibble, _) = Self::fields(byte);
         if nibble == Self::TYPES_STREAM {
@@ -1160,6 +1167,8 @@ mod tests {
     #[case::uniform_points(0x16, false, Some(GeometryType::Point), 4096)]
     #[case::uniform_multi_polygons(0x60, false, Some(GeometryType::MultiPolygon), 64)]
     #[case::m_values_over_a_uniform_type(0xCF, true, Some(GeometryType::MultiPoint), 2_097_152)]
+    #[case::uniform_meshes(0x70, false, Some(GeometryType::Mesh), 64)]
+    #[case::m_values_over_uniform_meshes(0xF6, true, Some(GeometryType::Mesh), 4096)]
     fn layer_header_byte_roundtrip(
         #[case] byte: u8,
         #[case] m_values: bool,
@@ -1173,15 +1182,6 @@ mod tests {
         );
         assert_eq!(header.extent.get(), extent);
         assert_eq!(header.to_byte(), byte);
-    }
-
-    #[rstest]
-    #[case::reserved_uniform_type(0x70)]
-    #[case::reserved_uniform_type_over_an_extent(0x7F)]
-    #[case::reserved_uniform_type_with_m_values(0xF6)]
-    fn layer_header_byte_rejects_the_reserved_uniform_type(#[case] byte: u8) {
-        let err = LayerHeader02::parse(byte).unwrap_err();
-        assert!(matches!(err, MltError::ParsingLayerHeader02(b) if b == byte));
     }
 
     #[rstest]
@@ -1249,6 +1249,17 @@ mod tests {
         assert_eq!(layout.has_geo_lengths(), has_outlines);
         assert_eq!(layout.has_part_lengths(), has_outlines);
         assert_eq!(layout.has_ring_lengths(), has_outlines);
+    }
+
+    #[test]
+    fn the_meshes_layout_reads_vertex_counts_and_triangles_only() {
+        let layout = GeoLayout::try_from(0x0E).unwrap();
+        assert_eq!(layout, GeoLayout::Meshes);
+        assert!(layout.has_geo_lengths());
+        assert!(layout.is_tess());
+        assert!(!layout.has_part_lengths());
+        assert!(!layout.has_ring_lengths());
+        assert!(!layout.is_dict());
     }
 
     #[rstest]
@@ -1329,6 +1340,7 @@ mod tests {
     #[case::multi_polygons_dict(GeoLayout::MultiPolygonsDict, true)]
     #[case::tess_polygons(GeoLayout::TessPolygons, false)]
     #[case::tess_polygons_with_outlines(GeoLayout::TessPolygonsWithOutlines, true)]
+    #[case::meshes(GeoLayout::Meshes, true)]
     fn only_a_layout_with_per_feature_vertex_counts_takes_m_values(
         #[case] layout: GeoLayout,
         #[case] allowed: bool,
@@ -1441,7 +1453,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::unassigned_geo_layout(0b0000_1110)]
+    #[case::unassigned_geo_layout(0b0000_1111)]
     #[case::unassigned_geo_layout_with_shared(0b0010_1111)]
     fn layer_layout_byte_rejects_unassigned_geo_layout(#[case] byte: u8) {
         let err = LayerLayout::parse(byte).unwrap_err();

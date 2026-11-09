@@ -99,4 +99,9 @@ pub enum GeometryType {
     MultiPoint,
     MultiLineString,
     MultiPolygon,
+    /// `(x, y, z)` vertices and the triangles between them.
+    ///
+    /// Only a v2 layer with the `Meshes` layout holds one, and it names the type in its
+    /// header byte, so no types stream may carry it.
+    Mesh,
 }

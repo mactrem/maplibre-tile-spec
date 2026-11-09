@@ -111,7 +111,7 @@ pub enum MltError {
     MValueImplicitCount { name: String, byte: u8 },
     #[cfg(feature = "unstable-v2")]
     #[error(
-        "m-value column {name} holds {actual} values, but its features have {expected} vertices"
+        "m-value column {name} holds {actual} values, but its features have {expected} vertices or triangles"
     )]
     MValueColumnLengthMismatch {
         name: String,
@@ -148,6 +148,22 @@ pub enum MltError {
         expected: usize,
         actual: usize,
     },
+    #[cfg(feature = "unstable-v2")]
+    #[error("m-value {index} holds {actual} values, but the mesh has {expected} triangles")]
+    MValueTriangleCountMismatch {
+        index: usize,
+        expected: usize,
+        actual: usize,
+    },
+    #[cfg(feature = "unstable-v2")]
+    #[error("m-value column {0} holds a value per triangle, which only a mesh has")]
+    TriangleMValueWithoutMesh(String),
+    #[cfg(feature = "unstable-v2")]
+    #[error("m-value column {0} holds a value per triangle, which only a Meshes layer can store")]
+    TriangleMValueOutsideMeshes(String),
+    #[cfg(feature = "unstable-v2")]
+    #[error("m-value scope byte {0} is reserved: only 0 (vertex) and 1 (triangle) are defined")]
+    InvalidMValueScope(u8),
     #[error("8-bit integers are a v2 feature, so column {0} cannot be written as v1")]
     EightBitNeedsV2(String),
     #[cfg(feature = "unstable-v2")]
@@ -162,7 +178,7 @@ pub enum MltError {
     #[error("a z step of 10^{0} m is outside 10^-3..=10^4 m")]
     InvalidZStep(i8),
     #[cfg(feature = "unstable-v2")]
-    #[error("z step code {0} is outside 0..=7")]
+    #[error("z step code {0} is outside 0..=15")]
     InvalidZStepCode(u8),
     #[cfg(feature = "unstable-v2")]
     #[error(
@@ -178,6 +194,44 @@ pub enum MltError {
     #[cfg(feature = "unstable-v2")]
     #[error("a vertex stream of {0} words does not hold whole (x, y, z) triples")]
     InvalidTripleStreamSize(usize),
+    #[error(
+        "a types stream names geometry type Mesh for feature {0}, which only a Meshes layer's header byte may name"
+    )]
+    MeshInTypesStream(usize),
+    #[error("meshes are a v2 feature, so layer {0} cannot be written as v1")]
+    MeshNeedsV2(String),
+    #[cfg(feature = "unstable-v2")]
+    #[error(
+        "uniform geometry type {0:?} cannot go with geometry layout {1}: a Mesh needs the Meshes layout, which holds nothing else"
+    )]
+    MeshLayoutMismatch(Option<GeometryType>, &'static str),
+    #[cfg(feature = "unstable-v2")]
+    #[error("a layer cannot mix meshes with other geometries")]
+    MixedMeshLayer,
+    #[cfg(feature = "unstable-v2")]
+    #[error("a mesh needs (x, y, z) vertices, so its layer needs a z step")]
+    MeshWithoutZ,
+    #[cfg(feature = "unstable-v2")]
+    #[error(
+        "the geo lengths of a Meshes layer sum to {expected} vertices, but its vertex stream holds {actual}"
+    )]
+    MeshVertexCountMismatch { expected: usize, actual: usize },
+    #[cfg(feature = "unstable-v2")]
+    #[error(
+        "a triangle of mesh feature {feature} names vertex {vertex}, outside the feature's run {start}..{end}"
+    )]
+    MeshTriangleOutsideRun {
+        feature: usize,
+        vertex: u32,
+        start: usize,
+        end: usize,
+    },
+    #[cfg(feature = "unstable-v2")]
+    #[error("a mesh triangle names vertex {vertex}, but the mesh has {count} vertices")]
+    MeshVertexOutOfRange { vertex: u32, count: usize },
+    #[cfg(feature = "unstable-v2")]
+    #[error("a mesh holds its vertices as a MultiPoint, not a {0}")]
+    MeshNotMultiPoint(&'static str),
     #[cfg(feature = "unstable-v2")]
     #[error("nested properties are a v2 feature, so layer {0} cannot be written as v1")]
     NestedNeedsV2(String),

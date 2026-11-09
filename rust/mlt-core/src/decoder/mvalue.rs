@@ -1,4 +1,4 @@
-//! Vertex-scoped columns, which only tag `0x02` (v2) layers carry.
+//! Vertex- and triangle-scoped columns, which only tag `0x02` (v2) layers carry.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -10,19 +10,26 @@ use compact_str::CompactString;
 use crate::decoder::{
     GeometryValues, ParsedStrings, RawFloats, RawPresence, RawScalar, RawStrings,
 };
-use crate::tile::{MValue, PropKind};
+use crate::tile::{MValue, MValueScope, PropKind};
 use crate::{Decode, DecodeState, Decoder, Lazy, MltError, MltResult};
 
 /// An m-value column, parameterized by decode state.
 pub type MValueColumn<'a, S = Lazy> =
     <S as DecodeState>::LazyOrParsed<RawMValue<'a>, ParsedMValue<'a>>;
 
-/// A raw m-value column as read directly from the tile.
+/// A raw m-value column as read directly from the tile: what its values run over, and its streams.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawMValue<'a> {
+    pub(crate) scope: MValueScope,
+    pub(crate) data: RawMValueData<'a>,
+}
+
+/// The streams of a raw m-value column.
 ///
 /// It reads the same streams a property column of the same data type reads, so it
 /// holds the same containers. Neither an id nor a shared dictionary is one of them.
 #[derive(Debug, Clone, PartialEq)]
-pub enum RawMValue<'a> {
+pub enum RawMValueData<'a> {
     Bool(RawScalar<'a>),
     I8(RawScalar<'a>),
     U8(RawScalar<'a>),
@@ -39,13 +46,15 @@ pub enum RawMValue<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedMValue<'a> {
     pub(crate) name: &'a str,
+    pub(crate) scope: MValueScope,
     /// One bit per feature, or [`None`] when every feature carries values.
     /// A feature whose bit is clear carries none at all, rather than one null per vertex.
     pub(crate) presence: Option<Cow<'a, BitSlice<u8, Lsb0>>>,
     pub(crate) values: MValues<'a>,
 }
 
-/// The values of one m-value column, one per vertex, flat across the features that carry them.
+/// The values of one m-value column, one per vertex or per triangle, flat across the
+/// features that carry them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MValues<'a> {
     Bool(Vec<bool>),
@@ -159,6 +168,12 @@ impl<'a> ParsedMValue<'a> {
         self.name
     }
 
+    /// Whether the values run over the vertex sequence or the triangle sequence.
+    #[must_use]
+    pub fn scope(&self) -> MValueScope {
+        self.scope
+    }
+
     #[must_use]
     pub fn values(&self) -> &MValues<'a> {
         &self.values
@@ -186,6 +201,7 @@ impl<'a> ParsedMValue<'a> {
     pub fn spans<'g>(&'g self, geometry: &'g GeometryValues) -> MValueSpans<'g> {
         MValueSpans {
             presence: self.presence.as_deref(),
+            scope: self.scope,
             geometry,
             feature: 0,
             start: 0,
@@ -194,13 +210,13 @@ impl<'a> ParsedMValue<'a> {
 
     /// Check that this column and the geometry it runs over agree.
     ///
-    /// The values are cut into per-feature runs by the geometry's vertex counts, so a
-    /// column that does not end exactly where the last feature's run does is rejected.
+    /// The values are cut into per-feature runs by the geometry's vertex or triangle counts,
+    /// so a column that does not end exactly where the last feature's run does is rejected.
     pub fn check_length(&self, geometry: &GeometryValues) -> MltResult<()> {
         let mut expected = 0;
         for index in 0..geometry.feature_count() {
             if self.is_present(index) {
-                expected += geometry.vertex_count(index)?;
+                expected += scoped_count(geometry, self.scope, index)?;
             }
         }
         if expected != self.values.len() {
@@ -219,12 +235,21 @@ fn is_present(presence: Option<&BitSlice<u8, Lsb0>>, index: usize) -> bool {
     presence.is_none_or(|bits| bits.get(index).as_deref().copied().unwrap_or(false))
 }
 
+/// How many values feature `index` owns in a column of `scope`.
+fn scoped_count(geometry: &GeometryValues, scope: MValueScope, index: usize) -> MltResult<usize> {
+    match scope {
+        MValueScope::Vertex => geometry.vertex_count(index),
+        MValueScope::Triangle => geometry.triangle_count(index),
+    }
+}
+
 /// Each feature's run of values in one m-value column, in feature order.
 ///
 /// A feature that carries no values yields [`None`] rather than an empty run.
 #[derive(Debug, Clone)]
 pub struct MValueSpans<'a> {
     presence: Option<&'a BitSlice<u8, Lsb0>>,
+    scope: MValueScope,
     geometry: &'a GeometryValues,
     feature: usize,
     start: usize,
@@ -242,7 +267,7 @@ impl Iterator for MValueSpans<'_> {
         if !is_present(self.presence, feature) {
             return Some(Ok(None));
         }
-        let count = match self.geometry.vertex_count(feature) {
+        let count = match scoped_count(self.geometry, self.scope, feature) {
             Ok(count) => count,
             Err(err) => return Some(Err(err)),
         };
@@ -265,6 +290,16 @@ impl<'a> Decode<ParsedMValue<'a>> for RawMValue<'a> {
     /// The presence bits are the feature's, so they never expand into the values
     /// the way a property column's nulls do.
     #[hotpath::measure]
+    fn decode(self, dec: &mut Decoder) -> MltResult<ParsedMValue<'a>> {
+        let scope = self.scope;
+        let mut column = self.data.decode(dec)?;
+        column.scope = scope;
+        Ok(column)
+    }
+}
+
+impl<'a> Decode<ParsedMValue<'a>> for RawMValueData<'a> {
+    /// Decode into a vertex-scoped [`ParsedMValue`], charging `dec` for every heap allocation.
     fn decode(self, dec: &mut Decoder) -> MltResult<ParsedMValue<'a>> {
         use MValues as M;
 
@@ -324,12 +359,19 @@ fn parsed<'a>(
 ) -> MltResult<ParsedMValue<'a>> {
     Ok(ParsedMValue {
         name,
+        scope: MValueScope::Vertex,
         presence: presence.decode_bits(dec)?,
         values,
     })
 }
 
 impl RawMValue<'_> {
+    pub(crate) fn storage(&self) -> Option<crate::decoder::ColumnStorage> {
+        self.data.storage()
+    }
+}
+
+impl RawMValueData<'_> {
     pub(crate) fn storage(&self) -> Option<crate::decoder::ColumnStorage> {
         match self {
             Self::Str(column) => Some(column.storage()),
@@ -365,6 +407,7 @@ mod tests {
     fn column(presence: Option<&BitSlice<u8, Lsb0>>, values: Vec<i32>) -> ParsedMValue<'_> {
         ParsedMValue {
             name: "m",
+            scope: MValueScope::Vertex,
             presence: presence.map(Cow::Borrowed),
             values: MValues::I32(values),
         }

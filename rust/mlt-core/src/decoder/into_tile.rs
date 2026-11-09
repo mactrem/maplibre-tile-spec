@@ -5,12 +5,14 @@
 //! feature, owning its geometry and property values outright. That is the form
 //! the optimizer, the sorting pipeline, and the converters work in.
 
-use crate::decoder::{Layer, Layer01, ParsedLayer, ParsedLayer01, ParsedProperty};
 #[cfg(feature = "unstable-v2")]
-use crate::decoder::{Layer02, MValueSpans, ParsedLayer02, ParsedMValue, ParsedNested};
+use crate::decoder::{
+    GeometryValues, Layer02, MValueSpans, ParsedLayer02, ParsedMValue, ParsedNested,
+};
+use crate::decoder::{Layer, Layer01, ParsedLayer, ParsedLayer01, ParsedProperty};
 use crate::errors::AsMltError as _;
 #[cfg(feature = "unstable-v2")]
-use crate::tile::{MValue, NestedKind, NestedValue};
+use crate::tile::{MValue, MValueScope, NestedKind, NestedValue};
 use crate::tile::{PropValue, TileFeature, TileLayer};
 use crate::{Decoder, Lazy, LendingIterator, MltResult};
 
@@ -67,6 +69,8 @@ impl ParsedLayer01<'_> {
                 nested: Vec::new(),
                 #[cfg(feature = "unstable-v2")]
                 z: Vec::new(),
+                #[cfg(feature = "unstable-v2")]
+                triangles: None,
             });
         }
         Ok(TileParts {
@@ -92,6 +96,7 @@ impl ParsedLayer02<'_> {
     #[hotpath::measure]
     pub fn into_tile(self, dec: &mut Decoder) -> MltResult<TileLayer> {
         let m_names: Vec<String> = self.m_values.iter().map(|m| m.name().to_string()).collect();
+        let m_scopes: Vec<MValueScope> = self.m_values.iter().map(ParsedMValue::scope).collect();
         let nested_names: Vec<String> = self.nested.iter().map(|n| n.name().to_string()).collect();
         let nested_kinds: Vec<NestedKind> = self.nested.iter().map(ParsedNested::kind).collect();
         // One walk per m-value column, stepped alongside the features. Cutting the
@@ -111,10 +116,11 @@ impl ParsedLayer02<'_> {
                 z.push(value?);
             }
             feature.z = z;
+            feature.triangles = mesh_triangles_of(geometry, index, dec)?;
         }
         parts
             .finish()?
-            .with_m_value_names(m_names)?
+            .with_m_value_names(m_names, m_scopes)?
             .with_nested(nested_names, nested_kinds)?
             .with_z_step(geometry.z_step())
     }
@@ -168,6 +174,26 @@ fn m_values_of(
         values.push(column.values().row(column.name(), span)?);
     }
     Ok(values)
+}
+
+/// The triangles of feature `index`, each corner counted from the feature's first vertex,
+/// or [`None`] when it is not a mesh.
+#[cfg(feature = "unstable-v2")]
+fn mesh_triangles_of(
+    geometry: &GeometryValues,
+    index: usize,
+    dec: &mut Decoder,
+) -> MltResult<Option<Vec<[u32; 3]>>> {
+    let Some(triangles) = geometry.mesh_triangles(index)? else {
+        return Ok(None);
+    };
+    let start = u32::try_from(geometry.vertex_range(index)?.start).or_overflow()?;
+    let local = |vertex: u32| vertex.checked_sub(start).or_overflow();
+    let mut out = dec.alloc::<[u32; 3]>(triangles.len())?;
+    for &[a, b, c] in triangles {
+        out.push([local(a)?, local(b)?, local(c)?]);
+    }
+    Ok(Some(out))
 }
 
 /// The nested values of feature `index`, one per column, charged against `dec`.
