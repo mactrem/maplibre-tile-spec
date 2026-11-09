@@ -78,7 +78,7 @@ for (const layer of decodeTileColumns(data).layers) {
             const value = columnValue(column, f); // undefined when feature f has no value
         }
     }
-    // v2 vertex-scoped (m-value) and nested columns are not passed on
+    // a v2 layer's m-value columns are in layer.mValues; nested columns are not passed on
 }
 ```
 
@@ -90,16 +90,29 @@ feature, LSB-first, left out when every feature has a value. `bool` comes as `0`
 64-bit integers, ids included, as `Float64Array`, so values above `Number.MAX_SAFE_INTEGER`
 lose precision.
 
-A 3D layer's `zStep` is the power of ten of its z grid's step in metres; `toElevation(z, zStep)`
-converts one z to metres, exactly as `mlt-core` does.
+A 3D layer's `zStep` is the power of ten of its z grid's step in metres, and its `zDatum` is what
+`z = 0` stands for: `"elevation"`, Terrain-RGB's base of -10000 m, or `"ground"`, so that z is a
+height above it. `toElevation(z, zStep, zDatum)` converts one z to metres, exactly as `mlt-core` does.
+
+A v2 layer's `mValues` hold its m-value columns, `{ name, scope, type, values, present? }`, or for
+strings `{ name, scope, type, codes, dictionary, present? }` with one dictionary code per value. A
+`"vertex"`-scoped column's values run over the vertices of the features that carry it, in feature
+order: when `present` is left out, one per vertex of the layer, aligned with `geometry.vertices`. A
+`"triangle"`-scoped column of a `Meshes` layer runs over the triangles the same way, aligned with
+`indexBuffer`. `present` has one bit per feature, and a feature whose bit is clear has no values at all.
+
+A `Meshes` layer's features are all `MltGeometryType.Mesh`: `geometryOffsets` starts each feature's
+run of vertices, and `triangleOffsets` each feature's triangles in the layer-wide `indexBuffer`.
+A mesh on the `"ground"` datum meets the terrain at the centre of its vertices' `(x, y)` bounding box.
 
 ### Features
 
 `featureGeometry(layer, i)` reads feature `i` of a column layer without knowing the offset levels.
 Its points, lines and polygon rings are views of the layer's vertices, still in tile coordinates,
 and a polygon's rings come ready for earcut. A `TessPolygonsWithOutlines` layer's triangles come per
-feature, counted from the feature's own vertices. A `TessPolygons` layer stores triangles without
-outlines, so `featureGeometry` rejects it; its `indexBuffer` and `triangleOffsets` are the triangles.
+feature, counted from the feature's own vertices, and so do a mesh's (`kind: "mesh"`). A `TessPolygons`
+layer stores triangles without outlines, so `featureGeometry` rejects it; its `indexBuffer` and
+`triangleOffsets` are the triangles.
 
 ```ts
 import { featureGeometry } from '@maplibre/mlt-wasm';
@@ -180,12 +193,13 @@ Shapes that need tessellation on the CPU work one polygon or line at a time:
 
 `decodeTile3D` reads a tile whose every layer has z coordinates. Its features have the same
 `loadGeometry()` and `loadPolygons()`, with every vertex an `[x, y, z]` array, so the rest of the
-code can assume 3D. It throws when any layer has no z coordinates, for which `decodeTile` reads the
+code can assume 3D. A mesh's `loadGeometry()` is one ring of its vertices, and `loadTriangles()`
+indexes into it. It throws when any layer has no z coordinates, for which `decodeTile` reads the
 tile in 2D, and when any layer uses the `TessPolygons` or `TessPolygonsWithOutlines` geometry
 layout. `decodeTileColumns` reads every layout, in 2D and 3D.
 
 Like `x` and `y`, `z` is the stored integer: it lies on the layer's `zStep` grid, and
-`toElevation(z, layer.zStep)` gives its elevation in metres.
+`toElevation(z, layer.zStep, layer.zDatum)` gives it in metres.
 
 ```ts
 import { decodeTile3D } from '@maplibre/mlt-wasm';

@@ -5,14 +5,19 @@
 //! Every array is copied out of WASM memory once: a view into it would be detached the next
 //! time that memory grows.
 
+#[cfg(feature = "unstable-v2")]
+use std::collections::HashMap;
+
 use js_sys::{
     Array, Float32Array, Float64Array, Int8Array, Int32Array, Object, Reflect, Uint8Array,
     Uint32Array,
 };
 use mlt_core::{
     Decoder, GeometryValues, ParsedLayer, ParsedLayer01, ParsedProperty, ParsedStrings, Parser,
-    PresentValues, PropKind, ZStep,
+    PresentValues, PropKind, ZDatum, ZStep,
 };
+#[cfg(feature = "unstable-v2")]
+use mlt_core::{MValueScope, MValues, ParsedMValue};
 use wasm_bindgen::prelude::*;
 
 use crate::to_js_err;
@@ -47,9 +52,18 @@ pub fn decode_tile_columns(data: &[u8], names: Option<Vec<String>>) -> Result<Ar
         // `ParsedLayer` is non_exhaustive: a layer of a tag this binding does not know is skipped.
         let object = match &parsed {
             ParsedLayer::Tag01(layer) => layer_object(layer, 1)?,
-            // A v2 layer's vertex-scoped and nested columns are not passed on.
+            // A v2 layer's nested columns are not passed on.
             #[cfg(feature = "unstable-v2")]
-            ParsedLayer::Tag02(layer) => layer_object(layer.layer(), 2)?,
+            ParsedLayer::Tag02(layer) => {
+                let object = layer_object(layer.layer(), 2)?;
+                let m_values = layer
+                    .m_values()
+                    .iter()
+                    .map(|column| m_value_column(column, layer.layer().feature_count()))
+                    .collect::<Array>();
+                set(&object, "mValues", &m_values);
+                object
+            }
             _ => continue,
         };
         layers.push(&object);
@@ -107,6 +121,11 @@ fn geometry_object(geometry: &GeometryValues) -> Object {
     );
     if let Some(step) = geometry.z_step() {
         set(&object, "zStep", &ZStep::exponent(step).into());
+        let datum = match step.datum() {
+            ZDatum::Elevation => "elevation",
+            ZDatum::Ground => "ground",
+        };
+        set(&object, "zDatum", &datum.into());
     }
     for (key, offsets) in [
         ("geometryOffsets", geometry.geometry_offsets()),
@@ -118,6 +137,56 @@ fn geometry_object(geometry: &GeometryValues) -> Object {
         if let Some(offsets) = offsets {
             set(&object, key, &Uint32Array::from(offsets));
         }
+    }
+    object
+}
+
+/// `{ name, scope, type, values, present? }`, or for strings
+/// `{ name, scope, type, codes, dictionary, present? }`.
+///
+/// The values run over the vertices of the features that carry the column, in feature order:
+/// with every feature present, one per vertex of the layer. A `"triangle"`-scoped column of a
+/// `Meshes` layer runs over the triangles instead, in the order of the index buffer.
+/// `present` is one bit per feature.
+#[cfg(feature = "unstable-v2")]
+fn m_value_column(column: &ParsedMValue<'_>, feature_count: usize) -> Object {
+    let object = Object::new();
+    set(&object, "name", &column.name().into());
+    let scope = match column.scope() {
+        MValueScope::Vertex => "vertex",
+        MValueScope::Triangle => "triangle",
+    };
+    set(&object, "scope", &scope.into());
+    set(&object, "type", &type_name(column.values().kind()).into());
+    match column.values() {
+        MValues::Bool(v) => set(&object, "values", &bool::js_array(v)),
+        MValues::I8(v) => set(&object, "values", &i8::js_array(v)),
+        MValues::U8(v) => set(&object, "values", &u8::js_array(v)),
+        MValues::I32(v) => set(&object, "values", &i32::js_array(v)),
+        MValues::U32(v) => set(&object, "values", &u32::js_array(v)),
+        MValues::I64(v) => set(&object, "values", &i64::js_array(v)),
+        MValues::U64(v) => set(&object, "values", &u64::js_array(v)),
+        MValues::F32(v) => set(&object, "values", &f32::js_array(v)),
+        MValues::F64(v) => set(&object, "values", &f64::js_array(v)),
+        MValues::Str(strings) => {
+            // A renderer evaluates a style once per distinct value, so strings come as codes.
+            let mut entries: HashMap<&str, u32> = HashMap::new();
+            let dictionary = Array::new();
+            let codes: Vec<u32> = (0..strings.feature_count())
+                .map(|i| {
+                    let value = string_at(strings, i).unwrap_or("");
+                    *entries.entry(value).or_insert_with(|| {
+                        dictionary.push(&JsValue::from_str(value));
+                        dictionary.length() - 1
+                    })
+                })
+                .collect();
+            set(&object, "codes", &Uint32Array::from(&codes[..]));
+            set(&object, "dictionary", &dictionary);
+        }
+    }
+    if let Some(present) = bitmap(feature_count, |i| column.is_present(i)) {
+        set(&object, "present", &present);
     }
     object
 }
