@@ -88,8 +88,8 @@ pub enum ZDatum {
     Elevation,
     /// The ground, so `z` is a height above it.
     ///
-    /// For a mesh, the ground is the terrain at the center of the feature's `(x, y)`
-    /// bounding box, and for any other geometry the terrain under each vertex.
+    /// Only a layer of meshes may use it. A mesh's ground is the terrain at the center of
+    /// the feature's `(x, y)` bounding box.
     Ground,
 }
 

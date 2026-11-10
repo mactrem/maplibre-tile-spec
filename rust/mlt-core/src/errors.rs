@@ -210,6 +210,11 @@ pub enum MltError {
     MeshWithoutZ,
     #[cfg(feature = "unstable-v2")]
     #[error(
+        "heights above the ground are for meshes only, so a layer of other geometries cannot use them"
+    )]
+    GroundZWithoutMeshes,
+    #[cfg(feature = "unstable-v2")]
+    #[error(
         "the geo lengths of a Meshes layer sum to {expected} vertices, but its vertex stream holds {actual}"
     )]
     MeshVertexCountMismatch { expected: usize, actual: usize },

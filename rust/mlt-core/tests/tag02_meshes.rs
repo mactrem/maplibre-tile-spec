@@ -321,10 +321,10 @@ fn a_mesh_layer_that_cannot_be_written_is_rejected(
     0x0,
     "uniform geometry type None cannot go with geometry layout Meshes: a Mesh needs the Meshes layout, which holds nothing else"
 )]
-#[case::mesh_over_multi_points(
+#[case::mesh_over_points(
     false,
     0x7,
-    "uniform geometry type Some(Mesh) cannot go with geometry layout MultiPoints: a Mesh needs the Meshes layout, which holds nothing else"
+    "uniform geometry type Some(Mesh) cannot go with geometry layout Points: a Mesh needs the Meshes layout, which holds nothing else"
 )]
 fn the_uniform_type_mesh_and_the_meshes_layout_need_each_other(
     #[case] meshes: bool,
@@ -334,19 +334,33 @@ fn the_uniform_type_mesh_and_the_meshes_layout_need_each_other(
     let layer = if meshes {
         mesh_layer(&[cube(0, 0)])
     } else {
-        let mut builder = TileLayer::builder("points", 4096).unwrap();
-        builder.set_z_step(height()).unwrap();
-        for i in 0..3 {
-            let mut feature =
-                builder.feature(Geometry::MultiPoint(MultiPoint(vec![Point::new(i, i)])));
-            feature.z(vec![i]).unwrap();
-            feature.finish().unwrap();
-        }
-        builder.finish()
+        points(ZStep::new(-2).unwrap())
     };
     let mut bytes = layer.encode(cfg_v2()).unwrap();
     let header = byte_offset(&bytes, "header");
     bytes[header] = (bytes[header] & 0b1000_1111) | (nibble << 4);
+    assert_eq!(try_decode(&bytes).unwrap_err().to_string(), expected);
+}
+
+fn points(z_step: ZStep) -> TileLayer {
+    let mut builder = TileLayer::builder("points", 4096).unwrap();
+    builder.set_z_step(z_step).unwrap();
+    let mut point = builder.feature(Geometry::Point(Point::new(1, 1)));
+    point.z(vec![7]).unwrap();
+    point.finish().unwrap();
+    builder.finish()
+}
+
+#[test]
+fn only_meshes_hold_heights_above_the_ground() {
+    let expected = "heights above the ground are for meshes only, so a layer of other geometries cannot use them";
+    let err = points(height()).encode(cfg_v2()).unwrap_err();
+    assert_eq!(err.to_string(), expected);
+
+    let mut bytes = points(ZStep::new(-2).unwrap()).encode(cfg_v2()).unwrap();
+    let z_step = byte_offset(&bytes, "z_step");
+    assert_eq!(bytes[z_step], 1);
+    bytes[z_step] = 9;
     assert_eq!(try_decode(&bytes).unwrap_err().to_string(), expected);
 }
 

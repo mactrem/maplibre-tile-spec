@@ -18,7 +18,7 @@ use crate::decoder::{
 use crate::encoder::geometry::model::VertexBufferType;
 use crate::encoder::model::StreamCtx;
 use crate::encoder::{Codecs, Encoder};
-use crate::tile::ZStep;
+use crate::tile::{ZDatum, ZStep};
 use crate::{Decoder, MltError, MltResult};
 
 /// Wrap a computed length stream: an empty stream is not written (and not
@@ -101,6 +101,9 @@ pub(crate) fn encode_geometry02(
             vertices,
             z_step,
         );
+    }
+    if z_step.is_some_and(|step| step.datum() == ZDatum::Ground) {
+        return Err(MltError::GroundZWithoutMeshes);
     }
 
     let geom_offsets = geometry_offsets.unwrap_or_default();

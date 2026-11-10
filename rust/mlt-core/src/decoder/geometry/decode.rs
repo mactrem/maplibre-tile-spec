@@ -9,6 +9,8 @@ use crate::decoder::{
 #[cfg(feature = "unstable-v2")]
 use crate::decoder::{LogicalEncoding, VertexLogical};
 use crate::errors::AsMltError as _;
+#[cfg(feature = "unstable-v2")]
+use crate::tile::ZDatum;
 use crate::utils::SetOptionOnce as _;
 use crate::{Decode, Decoder, MltError, MltResult, Parser};
 
@@ -593,6 +595,10 @@ impl Decode<GeometryValues> for RawGeometry<'_> {
                 "tree symbols and cycles come as a pair",
             ))?,
         };
+        #[cfg(feature = "unstable-v2")]
+        if !meshes && z_step.is_some_and(|step| step.datum() == ZDatum::Ground) {
+            return Err(MltError::GroundZWithoutMeshes);
+        }
 
         let triangles_only = !meshes && index_buffer.is_some() && part_offsets.is_none();
         if triangles_only {
