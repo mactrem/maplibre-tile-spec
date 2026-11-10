@@ -5,7 +5,7 @@ use crate::decoder::{
     RawStringsEncoding, StreamMeta,
 };
 #[cfg(feature = "unstable-v2")]
-use crate::decoder::{RawMValue, RawMValueData, root02::ColumnValues};
+use crate::decoder::{RawMValue, root02::ColumnValues};
 use crate::{Analyze, DecodeState, StatType};
 
 impl<'a, S: DecodeState> Analyze for Layer01<'a, S>
@@ -220,7 +220,7 @@ impl Analyze for RawMValue<'_> {
 }
 
 #[cfg(feature = "unstable-v2")]
-impl Analyze for RawMValueData<'_> {
+impl Analyze for super::mvalue::RawMValueData<'_> {
     fn for_each_stream(&self, cb: &mut dyn FnMut(StreamMeta)) {
         match self {
             Self::Bool(s)

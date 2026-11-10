@@ -61,7 +61,7 @@ pub(crate) use crate::decoder::{
 pub use crate::decoder::{
     Layer02, MValueColumn, MValueSpans, MValues, Nested, ParsedInterior, ParsedLayer02, ParsedLeaf,
     ParsedList, ParsedMValue, ParsedMap, ParsedNested, ParsedNode, ParsedStruct, RawInterior,
-    RawLeaf, RawList, RawMValue, RawMValueData, RawMap, RawNested, RawNode, RawStruct,
+    RawLeaf, RawList, RawMValue, RawMap, RawNested, RawNode, RawStruct,
 };
 pub use crate::errors::{MltError, MltResult};
 pub use crate::layer_writer::{FeatureWriter, LayerWriter};

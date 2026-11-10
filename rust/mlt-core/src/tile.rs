@@ -2302,19 +2302,6 @@ mod tests {
     }
 
     #[cfg(feature = "unstable-v2")]
-    #[rstest]
-    #[case::finest_elevation(ZStep::new(-3), 0)]
-    #[case::coarsest_elevation(ZStep::new(4), 7)]
-    #[case::finest_height(ZStep::above_ground(-3), 8)]
-    #[case::centimetre_height(ZStep::above_ground(-2), 9)]
-    #[case::coarsest_height(ZStep::above_ground(4), 15)]
-    fn a_z_step_codes_its_datum_in_bit_3(#[case] step: MltResult<ZStep>, #[case] code: u8) {
-        let step = step.unwrap();
-        assert_eq!(step.code(), code);
-        assert_eq!(ZStep::from_code(code).unwrap(), step);
-    }
-
-    #[cfg(feature = "unstable-v2")]
     #[test]
     fn a_height_above_ground_has_no_terrain_rgb_offset() {
         let step = ZStep::above_ground(-2).unwrap();

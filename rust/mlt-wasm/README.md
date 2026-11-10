@@ -94,12 +94,8 @@ A 3D layer's `zStep` is the power of ten of its z grid's step in metres, and its
 `z = 0` stands for: `"elevation"`, Terrain-RGB's base of -10000 m, or `"ground"`, so that z is a
 height above it. `toElevation(z, zStep, zDatum)` converts one z to metres, exactly as `mlt-core` does.
 
-A v2 layer's `mValues` hold its m-value columns, `{ name, scope, type, values, present? }`, or for
-strings `{ name, scope, type, codes, dictionary, present? }` with one dictionary code per value. A
-`"vertex"`-scoped column's values run over the vertices of the features that carry it, in feature
-order: when `present` is left out, one per vertex of the layer, aligned with `geometry.vertices`. A
-`"triangle"`-scoped column of a `Meshes` layer runs over the triangles the same way, aligned with
-`indexBuffer`. `present` has one bit per feature, and a feature whose bit is clear has no values at all.
+A v2 layer's `mValues` hold its m-value columns, one value per vertex or, in a `Meshes` layer, per
+triangle, and strings as dictionary codes; see `MltMValueColumn`.
 
 A `Meshes` layer's features are all `MltGeometryType.Mesh`: `geometryOffsets` starts each feature's
 run of vertices, and `triangleOffsets` each feature's triangles in the layer-wide `indexBuffer`.

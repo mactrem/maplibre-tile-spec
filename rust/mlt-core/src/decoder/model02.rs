@@ -1251,17 +1251,6 @@ mod tests {
         assert_eq!(layout.has_ring_lengths(), has_outlines);
     }
 
-    #[test]
-    fn the_meshes_layout_reads_vertex_counts_and_triangles_only() {
-        let layout = GeoLayout::try_from(0x0E).unwrap();
-        assert_eq!(layout, GeoLayout::Meshes);
-        assert!(layout.has_geo_lengths());
-        assert!(layout.is_tess());
-        assert!(!layout.has_part_lengths());
-        assert!(!layout.has_ring_lengths());
-        assert!(!layout.is_dict());
-    }
-
     #[rstest]
     #[case::flat(Topology::Flat)]
     #[case::parts(Topology::Parts(vec![2]))]

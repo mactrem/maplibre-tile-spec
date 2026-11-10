@@ -531,7 +531,6 @@ impl<'a> Walker<'a> {
             |b| format!("0x{b:02X} {:?} {:?}", typ.presence, typ.data),
             move |b| column_type_bits02(b, shared_count),
         )?;
-        let mut scope_suffix = "";
         if scoped {
             let byte;
             (input, byte) = self.field(input, "scope", parse_u8, |b| {
@@ -540,10 +539,7 @@ impl<'a> Walker<'a> {
                     Err(_) => format!("{b} reserved"),
                 })
             })?;
-            scope_suffix = match MValueScope::from_byte(byte)? {
-                MValueScope::Vertex => " per vertex",
-                MValueScope::Triangle => " per triangle",
-            };
+            MValueScope::from_byte(byte)?;
         }
 
         let mut name_suffix = String::new();
@@ -558,10 +554,7 @@ impl<'a> Walker<'a> {
         } else {
             ""
         };
-        self.relabel(
-            ci,
-            format!("{label} {opt}{:?}{name_suffix}{scope_suffix}", typ.data),
-        );
+        self.relabel(ci, format!("{label} {opt}{:?}{name_suffix}", typ.data));
 
         // Presence is a raw LSB0 bitfield, not a stream, and counts the data.
         // A shared bitfield was already walked at the layer root, so only its

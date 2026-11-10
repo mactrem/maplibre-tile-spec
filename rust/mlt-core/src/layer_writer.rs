@@ -329,7 +329,7 @@ impl<'a> FeatureWriter<'_, 'a> {
     }
 
     fn check_family(&self, family: Family, what: &'static str) -> MltResult<()> {
-        if Family::of(self.geometry_type).is_some_and(|(f, _)| f == family) {
+        if Family::of(self.geometry_type).0 == family {
             Ok(())
         } else {
             Err(MltError::InvalidFeatureGeometry(self.geometry_type, what))
@@ -341,13 +341,15 @@ impl<'a> FeatureWriter<'_, 'a> {
         let layer = &mut *self.layer;
         let geometry = &layer.geometry;
         let invalid = match Family::of(self.geometry_type) {
-            None => Some("has triangles, which a layer writer cannot take"),
-            Some((_, true)) => None,
-            Some((Family::Points, false)) => (geometry.coords.len() - self.start.coords != 1)
+            _ if self.geometry_type == GeometryType::Mesh => {
+                Some("has triangles, which a layer writer cannot take")
+            }
+            (_, true) => None,
+            (Family::Points, false) => (geometry.coords.len() - self.start.coords != 1)
                 .then_some("needs exactly one point"),
-            Some((Family::Lines, false)) => (geometry.part_ends.len() - self.start.parts != 1)
+            (Family::Lines, false) => (geometry.part_ends.len() - self.start.parts != 1)
                 .then_some("needs exactly one line"),
-            Some((Family::Polygons, false)) => (geometry.group_ends.len() - self.start.groups != 1)
+            (Family::Polygons, false) => (geometry.group_ends.len() - self.start.groups != 1)
                 .then_some("needs exactly one polygon"),
         };
         if let Some(reason) = invalid {
@@ -387,17 +389,16 @@ enum Family {
 }
 
 impl Family {
-    /// The family of `geometry_type`, or [`None`] for a mesh, which a layer writer cannot build.
-    fn of(geometry_type: GeometryType) -> Option<(Self, bool)> {
-        Some(match geometry_type {
+    /// A mesh's vertices are a `MultiPoint`'s, though [`FeatureWriter::finish`] rejects it.
+    fn of(geometry_type: GeometryType) -> (Self, bool) {
+        match geometry_type {
             GeometryType::Point => (Self::Points, false),
-            GeometryType::MultiPoint => (Self::Points, true),
+            GeometryType::MultiPoint | GeometryType::Mesh => (Self::Points, true),
             GeometryType::LineString => (Self::Lines, false),
             GeometryType::MultiLineString => (Self::Lines, true),
             GeometryType::Polygon => (Self::Polygons, false),
             GeometryType::MultiPolygon => (Self::Polygons, true),
-            GeometryType::Mesh => return None,
-        })
+        }
     }
 }
 
@@ -559,9 +560,9 @@ impl LayerSource for LayerWriter<'_> {
     ) -> impl Iterator<Item = impl Iterator<Item = &[Coord<i32>]> + '_> + '_ {
         let geometry = &self.geometry;
         // Each polygon is one group, whose parts are its rings.
-        let groups = match Family::of(geometry.types[feature]) {
-            Some((Family::Polygons, _)) => geometry.groups(feature),
-            Some((Family::Points | Family::Lines, _)) | None => 0..0,
+        let groups = match Family::of(geometry.types[feature]).0 {
+            Family::Polygons => geometry.groups(feature),
+            Family::Points | Family::Lines => 0..0,
         };
         groups.map(move |group| {
             geometry
@@ -574,9 +575,7 @@ impl LayerSource for LayerWriter<'_> {
         let geometry = &self.geometry;
         let groups = geometry.groups(feature);
         let part = |p| geometry.part(p).iter().copied();
-        let (family, _) =
-            Family::of(geometry.types[feature]).expect("FeatureWriter::finish rejects meshes");
-        Ok(match family {
+        Ok(match Family::of(geometry.types[feature]).0 {
             Family::Points => {
                 let mut out = layer.feature_of(MvtGeomType::Point);
                 out.points(geometry.feature_coords(feature).iter().copied())?;

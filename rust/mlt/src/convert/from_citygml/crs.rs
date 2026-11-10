@@ -63,14 +63,13 @@ impl Reprojector {
                 *p = [p[1].to_radians(), p[0].to_radians(), p[2]];
             }
         }
-        let heights: Vec<f64> = points.iter().map(|p| p[2]).collect();
         transform(&self.src, &self.dst, &mut Points(points))
             .map_err(|e| anyhow!("reprojecting from EPSG:{}: {e}", self.epsg))?;
-        for (p, h) in points.iter_mut().zip(heights) {
-            if !p[0].is_finite() || !p[1].is_finite() {
-                bail!("a position does not reproject from EPSG:{}", self.epsg);
-            }
-            p[2] = h;
+        if points
+            .iter()
+            .any(|p| !p[0].is_finite() || !p[1].is_finite())
+        {
+            bail!("a position does not reproject from EPSG:{}", self.epsg);
         }
         Ok(())
     }
@@ -84,8 +83,8 @@ impl Transform for Points<'_> {
         f: &mut F,
     ) -> proj4rs::errors::Result<()> {
         for p in self.0.iter_mut() {
-            let (x, y, z) = f(p[0], p[1], p[2])?;
-            *p = [x, y, z];
+            let (x, y, _) = f(p[0], p[1], p[2])?;
+            *p = [x, y, p[2]];
         }
         Ok(())
     }

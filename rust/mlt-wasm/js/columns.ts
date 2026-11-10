@@ -84,8 +84,8 @@ interface MltGeometryColumnsBase {
 
 /**
  * What a 3D layer's `z = 0` stands for: Terrain-RGB's base of -10000 m, so `z` is an
- * elevation, or the ground, so `z` is a height above it. A mesh's ground is the terrain at the
- * centre of its `(x, y)` bounding box; any other geometry's is the terrain under each vertex.
+ * elevation, or the ground, so `z` is a height above it, which only a `Meshes` layer uses. A
+ * mesh's ground is the terrain at the centre of its `(x, y)` bounding box.
  */
 export type MltZDatum = "elevation" | "ground";
 

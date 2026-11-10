@@ -216,9 +216,8 @@ fn meshes_and_their_triangle_values_survive_every_encoder_setting() {
 
     let bytes = layer.encode(cfg_v2()).unwrap();
     let tree = annotate(&bytes);
-    let labelled = |label: &str| tree.regions.iter().any(|r| r.label == label);
-    assert!(labelled(r#"m_value[0] Str "part" per vertex"#));
-    assert!(labelled(r#"m_value[1] I32 "face" per triangle"#));
+    let scopes = tree.regions.iter().filter(|r| r.label == "scope");
+    assert_eq!(scopes.map(|r| bytes[r.offset]).collect::<Vec<_>>(), [0, 1]);
     let header = tree.regions.iter().find(|r| r.label == "header").unwrap();
     assert!(
         header

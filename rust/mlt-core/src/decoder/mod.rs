@@ -54,9 +54,7 @@ pub use crate::decoder::model01::{ColumnType, Layer01, ParsedLayer01};
 #[cfg(feature = "unstable-v2")]
 pub use crate::decoder::model02::{GeoLayout, Layer02, LayerLayout, ParsedLayer02};
 #[cfg(feature = "unstable-v2")]
-pub use crate::decoder::mvalue::{
-    MValueColumn, MValueSpans, MValues, ParsedMValue, RawMValue, RawMValueData,
-};
+pub use crate::decoder::mvalue::{MValueColumn, MValueSpans, MValues, ParsedMValue, RawMValue};
 #[cfg(feature = "unstable-v2")]
 pub use crate::decoder::nested::{
     Nested, ParsedInterior, ParsedLeaf, ParsedList, ParsedMap, ParsedNested, ParsedNode,

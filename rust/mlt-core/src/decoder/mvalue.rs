@@ -29,7 +29,7 @@ pub struct RawMValue<'a> {
 /// It reads the same streams a property column of the same data type reads, so it
 /// holds the same containers. Neither an id nor a shared dictionary is one of them.
 #[derive(Debug, Clone, PartialEq)]
-pub enum RawMValueData<'a> {
+pub(crate) enum RawMValueData<'a> {
     Bool(RawScalar<'a>),
     I8(RawScalar<'a>),
     U8(RawScalar<'a>),

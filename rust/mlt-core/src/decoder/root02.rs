@@ -53,6 +53,7 @@ use crate::LazyParsed::Raw;
 use crate::MltError::{BufferUnderflow, MissingLayerName, TrailingLayerData};
 use crate::codecs::presence_coding::{self, PresenceCoding};
 use crate::codecs::varint::parse_varint;
+use crate::decoder::mvalue::RawMValueData;
 use crate::decoder::nested::parse_nested;
 use crate::decoder::stream::header02;
 use crate::decoder::stream::header02::{
@@ -63,7 +64,7 @@ use crate::decoder::{
     DictionaryType, FloatLogical, GeoLayout, GeoTypes, GeometryType, Id, IdWidth02, IndexBase,
     Layer01, Layer02, LayerBytes, LayerHeader02, LayerLayout, LengthType, LogicalEncoding, MValues,
     Nested, Presence02, RawFloats, RawFloatsEncoding, RawFsstData, RawGeometry, RawId, RawIdValue,
-    RawMValue, RawMValueData, RawPlainData, RawPresence, RawProperty, RawScalar, RawSharedDict,
+    RawMValue, RawPlainData, RawPresence, RawProperty, RawScalar, RawSharedDict,
     RawSharedDictEncoding, RawSharedDictItem, RawStream, RawStrings, RawStringsEncoding,
     SharedDictKind, ValueType02, ValuesColumn02,
 };
