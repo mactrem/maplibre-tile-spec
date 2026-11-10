@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 
 use crate::decoder::PropValueRef;
-use crate::{LendingIterator, MltResult, ParsedLayer};
 #[cfg(feature = "unstable-v2")]
 use crate::{
-    ParsedLayer02, ZStep,
+    Decoder, ParsedLayer02, ZStep,
     tile::{MValue, NestedValue, ZDatum},
 };
+use crate::{LendingIterator, MltResult, ParsedLayer};
 
 mod schema;
 pub use crate::convert::geojson::schema::PropertySchema;
@@ -458,19 +458,10 @@ fn z_values(layer: &ParsedLayer02<'_>) -> MltResult<(Option<ZStep>, std::vec::In
 #[cfg(feature = "unstable-v2")]
 fn mesh_triangles(layer: &ParsedLayer02<'_>) -> MltResult<Vec<Option<Vec<[u32; 3]>>>> {
     let geometry = layer.layer().geometry_values();
+    // The layer is decoded already, so only its own size bounds what this allocates.
+    let mut dec = Decoder::with_max_size(u32::MAX);
     (0..geometry.feature_count())
-        .map(|index| {
-            let Some(triangles) = geometry.mesh_triangles(index)? else {
-                return Ok(None);
-            };
-            let start = u32::try_from(geometry.vertex_range(index)?.start)?;
-            Ok(Some(
-                triangles
-                    .iter()
-                    .map(|t| t.map(|v| v.saturating_sub(start)))
-                    .collect(),
-            ))
-        })
+        .map(|index| geometry.local_mesh_triangles(index, &mut dec))
         .collect()
 }
 

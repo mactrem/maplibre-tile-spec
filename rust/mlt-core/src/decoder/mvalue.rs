@@ -239,7 +239,7 @@ fn is_present(presence: Option<&BitSlice<u8, Lsb0>>, index: usize) -> bool {
 fn scoped_count(geometry: &GeometryValues, scope: MValueScope, index: usize) -> MltResult<usize> {
     match scope {
         MValueScope::Vertex => geometry.vertex_count(index),
-        MValueScope::Triangle => geometry.triangle_count(index),
+        MValueScope::Triangle => Ok(geometry.mesh_triangles(index)?.map_or(0, <[_]>::len)),
     }
 }
 

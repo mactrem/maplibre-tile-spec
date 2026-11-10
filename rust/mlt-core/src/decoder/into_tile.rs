@@ -5,11 +5,9 @@
 //! feature, owning its geometry and property values outright. That is the form
 //! the optimizer, the sorting pipeline, and the converters work in.
 
-#[cfg(feature = "unstable-v2")]
-use crate::decoder::{
-    GeometryValues, Layer02, MValueSpans, ParsedLayer02, ParsedMValue, ParsedNested,
-};
 use crate::decoder::{Layer, Layer01, ParsedLayer, ParsedLayer01, ParsedProperty};
+#[cfg(feature = "unstable-v2")]
+use crate::decoder::{Layer02, MValueSpans, ParsedLayer02, ParsedMValue, ParsedNested};
 use crate::errors::AsMltError as _;
 #[cfg(feature = "unstable-v2")]
 use crate::tile::{MValue, MValueScope, NestedKind, NestedValue};
@@ -116,7 +114,7 @@ impl ParsedLayer02<'_> {
                 z.push(value?);
             }
             feature.z = z;
-            feature.triangles = mesh_triangles_of(geometry, index, dec)?;
+            feature.triangles = geometry.local_mesh_triangles(index, dec)?;
         }
         parts
             .finish()?
@@ -174,26 +172,6 @@ fn m_values_of(
         values.push(column.values().row(column.name(), span)?);
     }
     Ok(values)
-}
-
-/// The triangles of feature `index`, each corner counted from the feature's first vertex,
-/// or [`None`] when it is not a mesh.
-#[cfg(feature = "unstable-v2")]
-fn mesh_triangles_of(
-    geometry: &GeometryValues,
-    index: usize,
-    dec: &mut Decoder,
-) -> MltResult<Option<Vec<[u32; 3]>>> {
-    let Some(triangles) = geometry.mesh_triangles(index)? else {
-        return Ok(None);
-    };
-    let start = u32::try_from(geometry.vertex_range(index)?.start).or_overflow()?;
-    let local = |vertex: u32| vertex.checked_sub(start).or_overflow();
-    let mut out = dec.alloc::<[u32; 3]>(triangles.len())?;
-    for &[a, b, c] in triangles {
-        out.push([local(a)?, local(b)?, local(c)?]);
-    }
-    Ok(Some(out))
 }
 
 /// The nested values of feature `index`, one per column, charged against `dec`.

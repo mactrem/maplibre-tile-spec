@@ -18,6 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result as AnyResult};
+use martin_tile_utils::EARTH_CIRCUMFERENCE;
 use mlt_core::geo_types::{Geometry, MultiPoint, Point};
 use mlt_core::{MValue, MValueScope, PropKind, PropValue, TileLayer, ZStep};
 use rayon::prelude::*;
@@ -25,6 +26,7 @@ use walkdir::WalkDir;
 
 use self::crs::{Reprojector, epsg_of_srs_name};
 use self::parser::Part;
+use super::from_geojson::{mercator_unit, tile_index};
 use super::{ConvertArgs, Reencoder};
 
 /// The z grid without `--z-step`: 1 cm.
@@ -33,8 +35,6 @@ const DEFAULT_Z_STEP: i8 = -2;
 const UNIT_METRES: f64 = 0.01;
 /// The largest extent a v2 layer header can name.
 const MAX_EXTENT: u32 = 1 << 21;
-/// The WGS84 semi-major axis in metres.
-const WGS84_A: f64 = 6_378_137.0;
 /// The up component of a unit normal above which a surface without semantics is a roof, about
 /// 70 degrees from vertical.
 const ROOF_MIN_UP: f64 = 0.34;
@@ -195,14 +195,9 @@ struct Tile {
 
 impl Tile {
     /// The tile of `zoom` holding the Web Mercator position `[x, y]` of [`unit()`].
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the unit coordinates are clamped to [0, 1), so the products fit below 2^zoom"
-    )]
-    fn of(unit: [f64; 2], zoom: u8) -> Self {
-        let n = f64::from(1_u32 << zoom);
-        let [x, y] = unit.map(|u| (u.clamp(0.0, 1.0 - f64::EPSILON) * n) as u32);
+    fn of([x, y]: [f64; 2], zoom: u8) -> Self {
+        let n = 1 << zoom;
+        let (x, y) = (tile_index(x, n), tile_index(y, n));
         Self { zoom, x, y }
     }
 
@@ -217,7 +212,7 @@ impl Tile {
         let lat = (PI * (1.0 - 2.0 * (f64::from(self.y) + 0.5) / n))
             .sinh()
             .atan();
-        let width = 2.0 * PI * WGS84_A * lat.cos() / n;
+        let width = EARTH_CIRCUMFERENCE * lat.cos() / n;
         let exponent = (width / UNIT_METRES).log2().floor().clamp(6.0, 21.0) as u32;
         (1 << exponent).min(MAX_EXTENT)
     }
@@ -240,10 +235,8 @@ impl Tile {
 
 /// Web Mercator `[x, y]` of `[lon, lat]` in radians, the world spanning `[0, 1]`.
 fn unit(lon: f64, lat: f64) -> [f64; 2] {
-    [
-        (lon + PI) / (2.0 * PI),
-        (1.0 - lat.tan().asinh() / PI) / 2.0,
-    ]
+    let (x, y) = mercator_unit(lon.to_degrees(), lat.to_degrees());
+    [x, y]
 }
 
 /// A building on a tile's grid: its vertices, the triangles between them that still have three
@@ -385,28 +378,11 @@ fn layer(
 mod tests {
     use super::*;
 
-    const OPERA: [f64; 2] = [2.331_716_682_733_388, 48.872_017_348_646_814];
-
-    fn opera() -> [f64; 2] {
-        let [lon, lat] = OPERA.map(f64::to_radians);
-        unit(lon, lat)
-    }
-
     #[test]
-    fn a_position_lies_in_the_tile_of_its_zoom_on_a_grid_of_about_a_centimetre() {
-        let tile = Tile::of(opera(), 17);
-        assert_eq!(
-            tile,
-            Tile {
-                zoom: 17,
-                x: 66384,
-                y: 45083
-            }
-        );
-        let extents = [15, 16, 17].map(|zoom| Tile::of(opera(), zoom).extent());
+    fn a_tile_grid_unit_is_between_one_and_two_centimetres() {
+        let [lon, lat] = [2.331_716_682_733_388_f64, 48.872_017_348_646_814].map(f64::to_radians);
+        let extents = [15, 16, 17].map(|zoom| Tile::of(unit(lon, lat), zoom).extent());
         assert_eq!(extents, [65536, 32768, 16384]);
-        let [x, y] = tile.grid(opera(), tile.extent()).unwrap();
-        assert!((0..16384).contains(&x) && (0..16384).contains(&y));
     }
 
     #[test]

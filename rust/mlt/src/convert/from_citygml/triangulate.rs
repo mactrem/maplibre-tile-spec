@@ -1,12 +1,12 @@
 //! Planar polygons with holes, as `CityGML` stores surfaces, cut into triangles.
 
-use super::WGS84_A;
+use martin_tile_utils::EARTH_CIRCUMFERENCE;
 
 /// Below this length of the summed cross products, in squared metres, a ring has no area.
 const MIN_NORMAL: f64 = 1e-9;
 
 /// Metres per degree of latitude, on a sphere of the WGS84 semi-major axis.
-const METRES_PER_DEGREE: f64 = WGS84_A * std::f64::consts::PI / 180.0;
+const METRES_PER_DEGREE: f64 = EARTH_CIRCUMFERENCE / 360.0;
 
 /// Cuts the polygon whose rings are `points[..ends[0]]`, `points[ends[0]..ends[1]]` and so on,
 /// the exterior first, into triangles appended to `out` as indices into `points`.

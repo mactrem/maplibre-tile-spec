@@ -28,6 +28,7 @@ use rayon::prelude::*;
 
 use self::clip::Rect;
 use self::feature_id::feature_id;
+pub(super) use self::project::mercator_unit;
 use self::project::{Dims, Geom, Projector, Vertex};
 use self::round::to_tile;
 use super::{ConvertArgs, Reencoder};
@@ -189,7 +190,7 @@ fn check_dimensions(dims: Option<Dims>, z_step: Option<ZStep>) -> AnyResult<()> 
     clippy::cast_sign_loss,
     reason = "the product is floored, clamped to 0.., and capped at n - 1 < 2^30"
 )]
-fn tile_index(unit: f64, n: u32) -> u32 {
+pub(super) fn tile_index(unit: f64, n: u32) -> u32 {
     ((unit * f64::from(n)).floor().max(0.0) as u32).min(n - 1)
 }
 

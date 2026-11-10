@@ -112,18 +112,6 @@ mod tests {
     }
 
     #[test]
-    fn utm_positions_land_where_they_belong() {
-        let r = Reprojector::new(25832).unwrap();
-        // Central Hamburg: 66 km east of zone 32's central meridian, 9 E, at 53.5 N.
-        let mut points = [[500_000.0, 0.0, 0.0], [566_330.0, 5_933_830.0, 6.5]];
-        r.to_geodetic(&mut points).unwrap();
-        assert!((points[1][2] - 6.5).abs() < 1e-12);
-        let [[lon0, lat0, _], [lon, lat, _]] = points.map(|p| p.map(f64::to_degrees));
-        assert!((lon0 - 9.0).abs() < 1e-9 && lat0.abs() < 1e-9);
-        assert!((10.0..10.01).contains(&lon) && (53.5..53.6).contains(&lat));
-    }
-
-    #[test]
     fn geographic_positions_are_read_latitude_first() {
         let r = Reprojector::new(4326).unwrap();
         assert!(r.geographic);

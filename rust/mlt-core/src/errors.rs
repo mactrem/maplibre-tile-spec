@@ -159,9 +159,6 @@ pub enum MltError {
     #[error("m-value column {0} holds a value per triangle, which only a mesh has")]
     TriangleMValueWithoutMesh(String),
     #[cfg(feature = "unstable-v2")]
-    #[error("m-value column {0} holds a value per triangle, which only a Meshes layer can store")]
-    TriangleMValueOutsideMeshes(String),
-    #[cfg(feature = "unstable-v2")]
     #[error("m-value scope byte {0} is reserved: only 0 (vertex) and 1 (triangle) are defined")]
     InvalidMValueScope(u8),
     #[error("8-bit integers are a v2 feature, so column {0} cannot be written as v1")]
@@ -230,8 +227,8 @@ pub enum MltError {
     #[error("a mesh triangle names vertex {vertex}, but the mesh has {count} vertices")]
     MeshVertexOutOfRange { vertex: u32, count: usize },
     #[cfg(feature = "unstable-v2")]
-    #[error("a mesh holds its vertices as a MultiPoint, not a {0}")]
-    MeshNotMultiPoint(&'static str),
+    #[error("a mesh holds its vertices as a MultiPoint")]
+    MeshNotMultiPoint,
     #[cfg(feature = "unstable-v2")]
     #[error("nested properties are a v2 feature, so layer {0} cannot be written as v1")]
     NestedNeedsV2(String),

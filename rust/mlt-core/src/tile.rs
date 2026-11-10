@@ -1013,7 +1013,7 @@ impl TileFeature {
     #[cfg(feature = "unstable-v2")]
     pub fn set_triangles(&mut self, triangles: Vec<[u32; 3]>) -> MltResult<()> {
         let Geometry::MultiPoint(points) = &self.geometry else {
-            return Err(MltError::MeshNotMultiPoint(geometry_name(&self.geometry)));
+            return Err(MltError::MeshNotMultiPoint);
         };
         let count = points.0.len();
         if let Some(&vertex) = triangles
@@ -1673,23 +1673,6 @@ pub(crate) fn stored_len(coords: &[Coord<i32>]) -> usize {
         coords.len() - 1
     } else {
         coords.len()
-    }
-}
-
-/// The name of the geometry's variant, for errors.
-#[cfg(feature = "unstable-v2")]
-fn geometry_name(geom: &Geometry<i32>) -> &'static str {
-    match geom {
-        Geometry::Point(_) => "Point",
-        Geometry::Line(_) => "Line",
-        Geometry::LineString(_) => "LineString",
-        Geometry::Polygon(_) => "Polygon",
-        Geometry::MultiPoint(_) => "MultiPoint",
-        Geometry::MultiLineString(_) => "MultiLineString",
-        Geometry::MultiPolygon(_) => "MultiPolygon",
-        Geometry::GeometryCollection(_) => "GeometryCollection",
-        Geometry::Rect(_) => "Rect",
-        Geometry::Triangle(_) => "Triangle",
     }
 }
 
@@ -2363,7 +2346,7 @@ mod tests {
             TileFeature::new(Geometry::LineString(LineString::from(vec![(0, 0), (1, 1)])));
         assert!(matches!(
             line.set_triangles(vec![]),
-            Err(MltError::MeshNotMultiPoint("LineString"))
+            Err(MltError::MeshNotMultiPoint)
         ));
     }
 

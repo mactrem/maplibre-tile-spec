@@ -274,7 +274,7 @@ pub(crate) fn encode_into02(
         .iter()
         .find(|m| m.scope == MValueScope::Triangle && !meshes)
     {
-        return Err(MltError::TriangleMValueOutsideMeshes(m_value.name.clone()));
+        return Err(MltError::TriangleMValueWithoutMesh(m_value.name.clone()));
     }
     let decoded = triangle_offsets.map(|offsets| DecodedTriangles {
         offsets,
