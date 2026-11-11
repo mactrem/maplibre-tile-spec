@@ -1,0 +1,52 @@
+name: Publish the meshes viewer
+
+# Deploys mlt-wasm/viewer/meshes.html with a CityGML extract tiled by `mlt convert`, so that a
+# reviewer of the Meshes layout can open it. Pages of the repository must be set to deploy from
+# GitHub Actions, and its github-pages environment must allow this branch.
+
+on:
+  push:
+    branches: [ spec-mesh-converter-final ]
+  workflow_dispatch:
+    inputs:
+      gml:
+        description: 'CityGML file or directory to tile, relative to rust/'
+        default: '../test/fixtures/meshes/buildings.gml'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+
+      - uses: ./.github/actions/mlt-setup-rust
+        with: { toolchain: nightly }
+      - run: rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
+      - uses: ./.github/actions/mlt-setup-node
+
+      - name: Build the site
+        env:
+          GML: ${{ inputs.gml || '../test/fixtures/meshes/buildings.gml' }}
+        run: just -v rust::mesh-site "$GML" target/mesh-site
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with: { path: rust/target/mesh-site }
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: { pages: write, id-token: write }
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

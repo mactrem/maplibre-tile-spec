@@ -217,7 +217,8 @@ for (const [name, layer] of Object.entries(tile.layers)) {
 `z/x/y.mlt` tiles. As on a pitched map, it draws the tiles near the camera at the highest zoom and
 the farther ones at lower zooms, within a triangle budget that is lower on phones. Build it with
 `npm run build:web`, which writes `pkg-web/`, serve this directory and open
-`viewer/meshes.html?tiles=<base>` or `viewer/meshes.html?url=<archive>`.
+`viewer/meshes.html?tiles=<base>` or `viewer/meshes.html?url=<archive>`. `just rust::mesh-site`
+builds the same as a static site over a `CityGML` input.
 
 ## Annotate
 

@@ -644,6 +644,24 @@ wasm-build: (just 'cargo-install' 'wasm-pack') _wasm-bindgen-cli
     npm ci --no-fund --no-audit
     npm run build
 
+# Build `out`, a static site of mlt-wasm/viewer/meshes.html showing `gml` tiled at zooms `min_zoom..=max_zoom`
+mesh-site gml='../test/fixtures/meshes/buildings.gml' out='target/mesh-site' min_zoom='14' max_zoom='16': _build-mlt-release (just 'cargo-install' 'wasm-pack') _wasm-bindgen-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -rf {{quote(out)}}
+    mkdir -p {{quote(out)}}/viewer {{quote(out)}}/pkg-web
+    (cd mlt-wasm && npm ci --no-fund --no-audit && npm run build:web)
+    cp mlt-wasm/pkg-web/mlt_wasm.js mlt-wasm/pkg-web/mlt_wasm_bg.wasm {{quote(out)}}/pkg-web/
+    cp mlt-wasm/viewer/meshes.html {{quote(out)}}/viewer/
+    target/release/mlt convert {{quote(gml)}} {{quote(out)}}/tiles --mlt-version 2 \
+        --min-zoom {{min_zoom}} --max-zoom {{max_zoom}}
+    # The viewer reads which tiles exist from tiles/index.json, a static host lists no directories
+    (cd {{quote(out)}}/tiles && find . -name '*.mlt' | sed 's|^\./||; s|\.mlt$||' | sort \
+        | awk 'BEGIN { printf "[" } { printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 } END { print "]" }') \
+        > {{quote(out)}}/tiles/index.json
+    printf '<!doctype html><meta http-equiv="refresh" content="0; url=viewer/meshes.html?tiles=../tiles">\n' \
+        > {{quote(out)}}/index.html
+
 # Run mlt-wasm tests
 [working-directory: 'mlt-wasm']
 wasm-test: wasm-build
