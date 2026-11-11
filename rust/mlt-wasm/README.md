@@ -215,7 +215,10 @@ for (const [name, layer] of Object.entries(tile.layers)) {
 
 `viewer/meshes.html` draws the v2 `Meshes` layers of a `.pmtiles` archive or of a directory of
 `z/x/y.mlt` tiles. As on a pitched map, it draws the tiles near the camera at the highest zoom and
-the farther ones at lower zooms, within a triangle budget that is lower on phones. Build it with
+the farther ones at lower zooms, within a triangle budget that is lower on phones. It tints each
+tile by the level of detail `mlt convert` writes at its zoom, and fades the far tiles into a fog
+that a slider thickens, which also draws fewer tiles, as none is drawn past where it turns opaque.
+Build it with
 `npm run build:web`, which writes `pkg-web/`, serve this directory and open
 `viewer/meshes.html?tiles=<base>` or `viewer/meshes.html?url=<archive>`. `just rust::mesh-site`
 builds the same as a static site over a `CityGML` input.

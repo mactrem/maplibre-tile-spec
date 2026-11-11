@@ -13,7 +13,9 @@
   A .pmtiles file can also be picked or dropped on the page.
 
   Drag to pan, right-drag or drag with two fingers to turn and pitch. Click a building for its
-  properties, double-click it to turn around it.
+  properties, double-click it to turn around it. The tiles are tinted by the level of detail
+  `mlt convert` writes at their zoom, and fade into a fog: the denser it is, the nearer the drawing
+  ends, and the fewer tiles are loaded and drawn.
 -->
 <html lang="en">
 <head>
@@ -29,7 +31,8 @@
   #panel input[type="file"] { max-width: 100%; }
   #status { white-space: pre-wrap; margin-top: 6px; color: #9cf; }
   #picked { white-space: pre-wrap; margin-top: 6px; background: #111; color: #ddd; max-height: 35vh; overflow: auto; font-family: ui-monospace, monospace; font-size: 12px; }
-  #legend span { display: inline-block; width: 10px; height: 10px; margin: 0 4px 0 8px; }
+  #fog { vertical-align: middle; width: 160px; }
+  #legend span, #lodLegend span { display: inline-block; width: 10px; height: 10px; margin: 0 4px 0 8px; }
   #stats { position: absolute; left: 8px; bottom: 8px; padding: 2px 6px; background: #000a; border-radius: 4px; white-space: pre; font: 11px ui-monospace, monospace; pointer-events: none; }
   #drop { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; font-size: 24px; background: #0008; pointer-events: none; }
   body.dragging #drop { display: flex; }
@@ -49,6 +52,9 @@
   <input type="file" id="file" accept=".pmtiles">
   <label><input type="checkbox" id="byPart" checked> Colour by part, not by the color m-value</label>
   <div id="legend"></div>
+  <label><input type="checkbox" id="byLod" checked> Tint by level of detail</label>
+  <div id="lodLegend"></div>
+  <label>Fog <input type="range" id="fog" min="0" max="100" value="30"></label>
   <div id="status">Drop a .pmtiles file, or pick one.</div>
   <div id="picked"></div>
 </details>
@@ -62,6 +68,8 @@ import init, { decodeTileColumns } from "mlt-wasm";
 
 const MESH = 6;
 const PARTS = { wall: 0xe3ded4, roof: 0xa36654, ground: 0x8c8a85, window: 0x7391a8, door: 0x856145 };
+/** The levels of detail `mlt convert` writes at the highest zoom, the one below, and all lower ones, and their tints. */
+const LODS = [{ name: "LOD3", tint: 0xffa070 }, { name: "LOD2", tint: 0x90d890 }, { name: "block", tint: 0x80a8ff }];
 const EARTH = 2 * Math.PI * 6378137;
 const CHILDREN = [[0, 0], [1, 0], [0, 1], [1, 1]];
 /** Metres: the highest a building reaches, and how far it reaches beyond the tile holding its centre. */
@@ -70,6 +78,8 @@ const MAX_HEIGHT = 350, OVERHANG = 100;
 const TILE_PX = 512;
 /** Nothing is drawn farther than this many tiles of the lowest zoom. */
 const FAR_TILES = 8;
+/** The fraction of that distance drawn in the densest fog. */
+const FOG_NEAREST = 1 / 8;
 const MAX_LOADS = 6;
 const small = matchMedia("(pointer: coarse), (max-width: 600px)").matches;
 /** The triangles of the tiles in view, counted nearest first, beyond which no tile is drawn. */
@@ -93,8 +103,10 @@ const camera = new THREE.PerspectiveCamera(45, 1, 1, 1e4);
 const controls = new MapControls(camera, renderer.domElement);
 controls.maxPolarAngle = 1.45;
 controls.zoomToCursor = true;
-const material = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true, side: THREE.DoubleSide });
-const highlight = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: 0xffd400, side: THREE.DoubleSide, depthTest: false }));
+/** One material per level of detail, its colour the tint the vertex colours are multiplied by. */
+const materials = LODS.map(() => new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true, side: THREE.DoubleSide }));
+const fog = new THREE.Fog(scene.background, 1, 2);
+const highlight = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: 0xffd400, side: THREE.DoubleSide, depthTest: false, fog: false }));
 highlight.renderOrder = 1;
 scene.add(highlight);
 const world = new THREE.Group();
@@ -111,6 +123,8 @@ let tiles = null;
 let origin = { u: 0, v: 0, scale: 1 };
 /** The distance in metres beyond which nothing is drawn. */
 let reach = 1;
+/** The distance in metres of the nearest tile in view not drawn, past the fog or the budget, where the fog is thickest. */
+let horizon = 1;
 /** Decoded tiles by `z/x/y`, least recently drawn first: their layers and mesh, none for a tile without meshes. */
 const cache = new Map();
 /** The abort controllers of the tile loads in flight, by `z/x/y`. */
@@ -226,6 +240,8 @@ function show(source) {
   const [u, v] = source.centre;
   origin = { u, v, scale: EARTH * Math.cos(Math.atan(Math.sinh(Math.PI * (1 - 2 * v)))) };
   reach = FAR_TILES * tileWidth(source.minZoom);
+  horizon = reach;
+  showLods();
   const distance = 4 * tileWidth(source.maxZoom);
   controls.target.set(0, 0, 0);
   camera.position.set(0, distance * Math.cos(0.9), distance * Math.sin(0.9));
@@ -237,26 +253,35 @@ function show(source) {
 const frustum = new THREE.Frustum(), viewProjection = new THREE.Matrix4(), box = new THREE.Box3();
 
 /**
- * The tiles in view and nearer than `reach`, nearest first: from the lowest zoom, a tile nearer
+ * The distance in metres the fog lets tiles be drawn to: `reach` without fog, down to
+ * `FOG_NEAREST` of it in the densest, but at least twice the camera's distance from its target.
+ */
+function fogLimit() {
+  const amount = $("fog").value / 100;
+  return Math.min(reach, Math.max(reach * FOG_NEAREST ** amount, 2 * camera.position.distanceTo(controls.target)));
+}
+
+/**
+ * The tiles in view and nearer than `limit`, nearest first: from the lowest zoom, a tile nearer
  * to the camera than `refine` times its width is split into its children, so that a tile drawn
  * spans at most about `TILE_PX` pixels.
  */
-function tilesInView() {
+function tilesInView(limit) {
   frustum.setFromProjectionMatrix(viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
   const refine = innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * TILE_PX);
   const found = [];
   const visit = (t) => {
     if (!frustum.intersectsBox(tileBox(t, box))) return;
     const distance = box.distanceToPoint(camera.position);
-    if (distance > reach) return;
+    if (distance > limit) return;
     if (t.z < tiles.maxZoom && distance < refine * tileWidth(t.z)) {
       for (const [dx, dy] of CHILDREN) visit(tile(t.z + 1, 2 * t.x + dx, 2 * t.y + dy));
     } else {
       found.push({ ...t, distance });
     }
   };
-  // The lowest-zoom tiles in the bounds and within `reach` of the camera along either axis.
-  const z = tiles.minZoom, n = 2 ** z, r = reach / origin.scale, [u0, v0, u1, v1] = tiles.bounds;
+  // The lowest-zoom tiles in the bounds and within `limit` of the camera along either axis.
+  const z = tiles.minZoom, n = 2 ** z, r = limit / origin.scale, [u0, v0, u1, v1] = tiles.bounds;
   const span = (min, max, at) => [Math.max(0, Math.floor(Math.max(min, at - r) * n)), Math.min(n - 1, Math.floor(Math.min(max, at + r) * n))];
   const [x0, x1] = span(u0, u1, origin.u + camera.position.x / origin.scale);
   const [y0, y1] = span(v0, v1, origin.v + camera.position.z / origin.scale);
@@ -337,9 +362,12 @@ function update() {
   if (!tiles) return;
   fitDepth();
   camera.updateMatrixWorld();
-  const found = tilesInView();
+  const limit = fogLimit();
+  const found = tilesInView(limit);
   for (const t of found) if (!cache.has(t.key) && !tiles.has(t.z, t.x, t.y)) cache.set(t.key, { triangles: 0 });
   const wanted = withinBudget(found);
+  horizon = wanted.length < found.length ? found[wanted.length].distance : limit;
+  fitFog();
   const drawn = drawnFor(wanted);
   world.clear();
   drawnPerZoom = new Map();
@@ -496,7 +524,7 @@ function buildMesh(entry) {
   geometry.setAttribute("color", new THREE.BufferAttribute(color, 3));
   geometry.setIndex(new THREE.BufferAttribute(index, 1));
   geometry.computeBoundingSphere();
-  const mesh = new THREE.Mesh(geometry, material);
+  const mesh = new THREE.Mesh(geometry, materials[lodOf(entry.z)]);
   const [east, south] = corner(entry.z, entry.x, entry.y);
   mesh.position.set(east, 0, south);
   mesh.matrixAutoUpdate = false;
@@ -512,6 +540,33 @@ function fitDepth() {
   camera.updateProjectionMatrix();
 }
 
+/** Thickens the fog towards `horizon` from the fraction of it the slider gives, none at 0. */
+function fitFog() {
+  const amount = $("fog").value / 100;
+  scene.fog = amount > 0 ? fog : null;
+  fog.near = horizon * (1 - amount);
+  fog.far = horizon;
+}
+
+/** The index in `LODS` of the level of detail of the tiles at zoom `z`. */
+const lodOf = (z) => Math.min(LODS.length - 1, tiles.maxZoom - z);
+
+/** Tints the materials, or not, as the checkbox says, and lists the zooms of each tint. */
+function showLods() {
+  const tinted = $("byLod").checked;
+  for (const [i, m] of materials.entries()) m.color.setHex(tinted ? LODS[i].tint : 0xffffff);
+  if (!tinted || !tiles) {
+    $("lodLegend").innerHTML = "";
+    return;
+  }
+  const zooms = (i) => {
+    const max = tiles.maxZoom - i, min = i < LODS.length - 1 ? max : tiles.minZoom;
+    return min === max ? `z${max}` : `z${min}–${max}`;
+  };
+  $("lodLegend").innerHTML = LODS.slice(0, tiles.maxZoom - tiles.minZoom + 1)
+    .map(({ name, tint }, i) => `<span style="background:#${tint.toString(16).padStart(6, "0")}"></span>${name} ${zooms(i)}`).join("");
+}
+
 let renderQueued = false;
 function requestRender() {
   if (renderQueued) return;
@@ -524,7 +579,7 @@ function requestRender() {
     let cached = 0;
     for (const entry of cache.values()) cached += entry.triangles;
     const zooms = [...drawnPerZoom].sort(([a], [b]) => a - b).map(([z, n]) => `z${z}: ${n}`).join(", ") || "no tiles";
-    $("stats").textContent = `${calls} draw calls, ${triangles.toLocaleString()} triangles; ${zooms}\n` +
+    $("stats").textContent = `${calls} draw calls, ${triangles.toLocaleString()} triangles; ${zooms}; to ${(horizon / 1000).toFixed(1)} km\n` +
       `cache: ${cache.size} tiles, ${cached.toLocaleString()} triangles${loading.size > 0 ? `; loading ${loading.size}` : ""}`;
   });
 }
@@ -607,6 +662,8 @@ $("byPart").addEventListener("change", () => {
   unpick();
   update();
 });
+$("byLod").addEventListener("change", () => { showLods(); requestRender(); });
+$("fog").addEventListener("input", update);
 $("file").addEventListener("change", (e) => e.target.files[0] && open(archiveTiles(new FileSource(e.target.files[0]), e.target.files[0].name)));
 addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("dragging"); });
 addEventListener("dragleave", () => document.body.classList.remove("dragging"));
