@@ -4,6 +4,7 @@
 #![cfg(not(feature = "hotpath"))]
 
 use std::fs;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,41 +60,77 @@ fn convert(input: &Path, output: &Path, args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// Half a cell of the LOD2 mesh at zoom 15 in Hamburg in 1 cm steps: half of half a pixel of a
+/// 512-pixel tile about 727 m across.
+const LOD2_HALF_CELL: i32 = 36;
+
 #[test]
 fn each_building_becomes_one_mesh_per_zoom_with_parts_and_heights_above_ground() {
     let dir = TempDir::new();
     let output = dir.0.join("out");
     convert(Path::new(BUILDINGS), &output, &TILED).unwrap();
     assert_eq!(fs::read_dir(&output).unwrap().count(), 2);
-    for tile in ["15/17294/10590", "16/34588/21180"] {
-        let bytes = fs::read(output.join(format!("{tile}.mlt"))).unwrap();
-        let mut layers = Parser::default().parse_layers(&bytes).unwrap();
-        assert_eq!(layers.len(), 1, "{tile}");
-        let layer = layers.pop().unwrap();
-        let layer = layer.into_tile(&mut Decoder::default()).unwrap().unwrap();
-        assert_eq!(layer.name(), "buildings");
-        assert_eq!(layer.z_step(), Some(ZStep::above_ground(-2).unwrap()));
-        assert_eq!(layer.property_names(), ["gml_id"]);
-        assert_eq!(layer.m_value_names(), ["part"]);
-        let mut features: Vec<&TileFeature> = layer.features().iter().collect();
-        features.sort_by_key(|f| f.id());
-        let [tower, kiosk] = features[..] else {
-            panic!("{tile}: {} features", features.len());
-        };
-        assert_box(tower, "tower", 6000, [8, 2, 2]);
-        assert_box(kiosk, "kiosk", 300, [8, 2, 0]);
-    }
+    let [tower, kiosk] = &features(&output, "16/34588/21180")[..] else {
+        panic!("2 features at zoom 16");
+    };
+    assert_box(tower, "tower", 6000..=6000, [8, 2, 2]);
+    assert_box(kiosk, "kiosk", 300..=300, [8, 2, 0]);
+    // The highest LOD of the boxes is LOD2, which zoom 15 clusters in cells of about 0.7 m.
+    let [tower, kiosk] = &features(&output, "15/17294/10590")[..] else {
+        panic!("2 features at zoom 15");
+    };
+    let near = |top: i32| top - LOD2_HALF_CELL..=top + LOD2_HALF_CELL;
+    assert_box(tower, "tower", near(6000), [8, 2, 2]);
+    assert_box(kiosk, "kiosk", near(300), [8, 2, 0]);
 }
 
-/// `feature` is the box `gml_id`: 8 welded corners at heights `0` and `top` in 1 cm steps above
-/// its ground, and `[wall, roof, ground]` triangles, each counter-clockwise in (x, -y, z) seen
-/// from outside and facing the way its part says.
-fn assert_box(feature: &TileFeature, gml_id: &str, top: i32, parts: [usize; 3]) {
+#[test]
+fn zooms_two_below_the_highest_hold_blocks_of_buildings_at_least_two_pixels_across() {
+    let dir = TempDir::new();
+    let output = dir.0.join("out");
+    let zooms = ["--mlt-version", "2", "--min-zoom", "13", "--max-zoom", "16"];
+    convert(Path::new(BUILDINGS), &output, &zooms).unwrap();
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 4);
+    let [tower, kiosk] = &features(&output, "14/8647/5295")[..] else {
+        panic!("2 features at zoom 14");
+    };
+    assert_box(tower, "tower", 6000..=6000, [8, 2, 0]);
+    assert_box(kiosk, "kiosk", 300..=300, [8, 2, 0]);
+    // A pixel at zoom 13 is about 5.7 m, so the 8 m kiosk is left out.
+    let [tower] = &features(&output, "13/4323/2647")[..] else {
+        panic!("1 feature at zoom 13");
+    };
+    assert_box(tower, "tower", 6000..=6000, [8, 2, 0]);
+}
+
+/// The features of the `buildings` layer of the tile `z/x/y` under `output`, by id.
+fn features(output: &Path, tile: &str) -> Vec<TileFeature> {
+    let bytes = fs::read(output.join(format!("{tile}.mlt"))).unwrap();
+    let mut layers = Parser::default().parse_layers(&bytes).unwrap();
+    assert_eq!(layers.len(), 1, "{tile}");
+    let layer = layers.pop().unwrap();
+    let layer = layer.into_tile(&mut Decoder::default()).unwrap().unwrap();
+    assert_eq!(layer.name(), "buildings");
+    assert_eq!(layer.z_step(), Some(ZStep::above_ground(-2).unwrap()));
+    assert_eq!(layer.property_names(), ["gml_id"]);
+    assert_eq!(layer.m_value_names(), ["part"]);
+    let mut features = layer.features().to_vec();
+    features.sort_by_key(TileFeature::id);
+    features
+}
+
+/// `feature` is the box `gml_id`: 8 welded corners at heights `0` and one in `top`, in 1 cm steps
+/// above its ground, and `[wall, roof, ground]` triangles, each counter-clockwise in (x, -y, z)
+/// seen from outside and facing the way its part says.
+fn assert_box(feature: &TileFeature, gml_id: &str, top: RangeInclusive<i32>, parts: [usize; 3]) {
     assert_eq!(feature.properties(), [PropValue::Str(Some(gml_id.into()))]);
     let mut heights = feature.z().to_vec();
     heights.sort_unstable();
     heights.dedup();
-    assert_eq!(heights, [0, top], "{gml_id}");
+    let [0, high] = heights[..] else {
+        panic!("{gml_id}: heights {heights:?}");
+    };
+    assert!(top.contains(&high), "{gml_id}: top {high}");
     let Geometry::MultiPoint(points) = feature.geometry() else {
         panic!("{gml_id}: {:?}", feature.geometry());
     };

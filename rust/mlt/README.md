@@ -72,12 +72,22 @@ name) and `--z-step`:
 mlt convert citygml/hamburg tiles --mlt-version 2 --min-zoom 14 --max-zoom 16
 ```
 
-Each building, bridge or tunnel becomes one feature at the highest LOD of each of its parts,
-reprojected from the file's `srsName`. A building is stored whole, in the tile of each zoom that
-holds the centre of its bounding box. Its z values are the height above its lowest vertex, on a
-1 cm grid unless `--z-step` says otherwise, and each triangle carries the `part` m-value (wall,
-roof, ground, window or door), so surfaces of different parts share their vertices. Each feature
-has the building's `gml_id` property. `--verify` does not compare meshes and is rejected.
+Each building, bridge or tunnel becomes one feature per zoom, reprojected from the file's
+`srsName`. A building is stored whole, in the tile of each zoom that holds the centre of its
+bounding box. Its z values are the height above its lowest vertex, on a 1 cm grid unless
+`--z-step` says otherwise, and each triangle carries the `part` m-value (wall, roof, ground,
+window or door), so surfaces of different parts share their vertices. Each feature has the
+building's `gml_id` property. `--verify` does not compare meshes and is rejected.
+
+Lower zooms hold less detail, a pixel being a 512th of a tile:
+
+- `--max-zoom` holds the highest LOD of each part of a building.
+- The zoom below holds LOD2: a part's own LOD2 or LOD1 if the file has one, or else its highest
+  LOD without windows, doors, installations and the holes they leave, its vertices clustered in
+  cells of half a pixel.
+- Lower zooms hold a block: the outline of the building's ground, or its bounding box without
+  one, clustered in cells of a pixel and raised to its top. A building under 2 pixels across is
+  left out.
 
 A file whose coordinates lie more than 1° from the input's other files in the CRS it declares,
 but near them in the CRS most files declare, is read in the latter with a warning: some Hamburg

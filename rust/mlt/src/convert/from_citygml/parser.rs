@@ -1,7 +1,7 @@
 //! One pass over a `CityGML` document by local names, so that `CityGML` 2.0 and 3.0 and any
 //! namespace prefixes read alike.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result as AnyResult, bail};
 use quick_xml::Reader;
@@ -30,18 +30,33 @@ impl Part {
     }
 }
 
+/// The meshes of a building a polygon is in: that of the highest LOD of each part, and that of
+/// LOD2 that lower zooms simplify.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lods {
+    Both,
+    Highest,
+    Lod2,
+}
+
 /// A polygon in source coordinates: its rings, the exterior first, none repeating its first
 /// point at its end.
 #[derive(Debug, PartialEq)]
 pub struct Polygon {
     /// The semantic surface the polygon lies in, if any.
     pub part: Option<Part>,
+    pub lods: Lods,
     pub points: Vec<[f64; 3]>,
     /// Where each ring ends in `points`.
     pub ends: Vec<usize>,
 }
 
-/// A building, bridge or tunnel, with the polygons of the highest LOD of each of its parts.
+/// A building, bridge or tunnel, with the polygons of the highest LOD of each of its parts and
+/// of its LOD2.
+///
+/// The LOD2 of a part whose highest LOD is above 2 is its highest LOD of 2 or less or, without
+/// one, its highest LOD without windows, doors and installations, and with the holes of the
+/// other polygons closed.
 #[derive(Debug, PartialEq)]
 pub struct Building {
     pub gml_id: Option<String>,
@@ -61,7 +76,9 @@ enum Tag {
     /// A city object that becomes one feature.
     Building,
     /// A part of a building that picks its own highest LOD, such as a building part or installation.
-    Owner,
+    Owner {
+        installation: bool,
+    },
     Semantic(Part),
     /// Content that is not drawn from outside: closure surfaces, interiors, LOD4, appearances and
     /// implicit geometries.
@@ -79,15 +96,17 @@ fn tag(name: &[u8]) -> Tag {
     match name {
         b"Building" | b"Bridge" | b"Tunnel" => Tag::Building,
         b"BuildingPart"
-        | b"BuildingInstallation"
         | b"BuildingConstructiveElement"
         | b"BridgePart"
-        | b"BridgeInstallation"
         | b"BridgeConstructionElement"
         | b"BridgeConstructiveElement"
         | b"TunnelPart"
-        | b"TunnelInstallation"
-        | b"TunnelConstructiveElement" => Tag::Owner,
+        | b"TunnelConstructiveElement" => Tag::Owner {
+            installation: false,
+        },
+        b"BuildingInstallation" | b"BridgeInstallation" | b"TunnelInstallation" => {
+            Tag::Owner { installation: true }
+        }
         b"WallSurface" | b"OuterCeilingSurface" => Tag::Semantic(Part::Wall),
         b"RoofSurface" | b"OuterFloorSurface" => Tag::Semantic(Part::Roof),
         b"GroundSurface" => Tag::Semantic(Part::Ground),
@@ -168,6 +187,8 @@ struct Parser {
     polygons: Vec<(u32, u8, Polygon)>,
     owners: Vec<u32>,
     next_owner: u32,
+    /// The owners of the building that are installations.
+    installations: HashSet<u32>,
     lods: Vec<u8>,
     /// The semantic surface of the innermost surface or owner, `None` for an owner.
     semantics: Vec<Option<Part>>,
@@ -195,7 +216,9 @@ impl Parser {
         let depth = self.stack.len();
         let tag = match (self.skip, tag(e.local_name().as_ref().as_bytes())) {
             (Some(_), _) => Tag::Other,
-            (None, Tag::Building) if self.building.is_some() => Tag::Owner,
+            (None, Tag::Building) if self.building.is_some() => Tag::Owner {
+                installation: false,
+            },
             (None, tag) => tag,
         };
         #[expect(
@@ -209,12 +232,16 @@ impl Parser {
                     polygons: Vec::new(),
                 });
                 self.polygons.clear();
+                self.installations.clear();
             }
             Tag::Skip => self.skip = Some(depth),
-            Tag::Owner => {
+            Tag::Owner { installation } => {
                 self.next_owner += 1;
                 self.owners.push(self.next_owner);
                 self.semantics.push(None);
+                if installation {
+                    self.installations.insert(self.next_owner);
+                }
             }
             Tag::Semantic(part) => self.semantics.push(Some(part)),
             Tag::Lod(lod) => self.lods.push(lod),
@@ -245,7 +272,7 @@ impl Parser {
         match tag {
             Tag::Building => self.end_building(),
             Tag::Skip => self.skip = None,
-            Tag::Owner => {
+            Tag::Owner { .. } => {
                 self.owners.pop();
                 self.semantics.pop();
             }
@@ -300,6 +327,7 @@ impl Parser {
         }
         let polygon = Polygon {
             part: self.semantics.last().copied().flatten(),
+            lods: Lods::Both,
             points: std::mem::take(&mut self.points),
             ends: std::mem::take(&mut self.ends),
         };
@@ -311,17 +339,44 @@ impl Parser {
         let Some(mut building) = self.building.take() else {
             return;
         };
-        let mut best: HashMap<u32, u8> = HashMap::new();
+        // The highest LOD of each owner, and its highest LOD of 2 or less.
+        let mut best: HashMap<u32, (u8, Option<u8>)> = HashMap::new();
         for &(owner, lod, _) in &self.polygons {
-            let best = best.entry(owner).or_insert(lod);
-            *best = (*best).max(lod);
+            let (highest, low) = best.entry(owner).or_insert((lod, None));
+            *highest = (*highest).max(lod);
+            if lod <= 2 {
+                *low = (*low).max(Some(lod));
+            }
         }
-        building.polygons = self
-            .polygons
-            .drain(..)
-            .filter(|(owner, lod, _)| best.get(owner) == Some(lod))
-            .map(|(_, _, polygon)| polygon)
-            .collect();
+        for (owner, lod, polygon) in self.polygons.drain(..) {
+            let Some(&(highest, low)) = best.get(&owner) else {
+                continue;
+            };
+            let lods = if lod != highest {
+                if Some(lod) != low {
+                    continue;
+                }
+                Lods::Lod2
+            } else if highest <= 2 {
+                Lods::Both
+            } else if low.is_some()
+                || self.installations.contains(&owner)
+                || matches!(polygon.part, Some(Part::Window | Part::Door))
+            {
+                Lods::Highest
+            } else if let [exterior, _, ..] = polygon.ends[..] {
+                building.polygons.push(Polygon {
+                    part: polygon.part,
+                    lods: Lods::Lod2,
+                    points: polygon.points[..exterior].to_vec(),
+                    ends: vec![exterior],
+                });
+                Lods::Highest
+            } else {
+                Lods::Both
+            };
+            building.polygons.push(Polygon { lods, ..polygon });
+        }
         if !building.polygons.is_empty() {
             self.document.buildings.push(building);
         }
@@ -425,6 +480,62 @@ mod tests {
             .collect();
         assert_eq!(parts, [Some(Part::Wall), Some(Part::Ground)]);
         assert_eq!(document.buildings[0].gml_id, None);
+    }
+
+    #[test]
+    fn lod2_closes_the_holes_of_lod3_and_leaves_out_windows_and_installations() {
+        let window = format!(
+            "<bldg:opening><bldg:Window><bldg:lod3MultiSurface><gml:MultiSurface><gml:surfaceMember>\
+             {}</gml:surfaceMember></gml:MultiSurface></bldg:lod3MultiSurface></bldg:Window></bldg:opening>",
+            polygon(&[&HOLE]),
+        );
+        let xml = format!(
+            "{HEAD}<bldg:Building><bldg:boundedBy><bldg:WallSurface><bldg:lod3MultiSurface>\
+             <gml:MultiSurface><gml:surfaceMember>{}</gml:surfaceMember></gml:MultiSurface>\
+             </bldg:lod3MultiSurface>{window}</bldg:WallSurface></bldg:boundedBy>\
+             <bldg:outerBuildingInstallation><bldg:BuildingInstallation>{}</bldg:BuildingInstallation>\
+             </bldg:outerBuildingInstallation></bldg:Building></core:CityModel>",
+            polygon(&[&SQUARE, &HOLE]),
+            surface("RoofSurface", 3, &polygon(&[&SQUARE])),
+        );
+        let document = parse(xml.as_bytes()).unwrap();
+        let polygons: Vec<_> = document.buildings[0]
+            .polygons
+            .iter()
+            .map(|p| (p.part, p.lods, p.ends.clone()))
+            .collect();
+        assert_eq!(
+            polygons,
+            [
+                (Some(Part::Wall), Lods::Lod2, vec![4]),
+                (Some(Part::Wall), Lods::Highest, vec![4, 7]),
+                (Some(Part::Window), Lods::Highest, vec![3]),
+                (Some(Part::Roof), Lods::Highest, vec![4]),
+            ]
+        );
+    }
+
+    #[test]
+    fn lod2_is_the_highest_lod_of_2_or_less_a_part_has_of_its_own() {
+        let xml = format!(
+            "{HEAD}<bldg:Building>{}{}{}</bldg:Building></core:CityModel>",
+            surface("WallSurface", 1, &polygon(&[&SQUARE])),
+            surface("WallSurface", 3, &polygon(&[&SQUARE, &HOLE])),
+            surface("RoofSurface", 2, &polygon(&[&SQUARE, &HOLE])),
+        );
+        let document = parse(xml.as_bytes()).unwrap();
+        let polygons: Vec<_> = document.buildings[0]
+            .polygons
+            .iter()
+            .map(|p| (p.part, p.lods, p.ends.len()))
+            .collect();
+        assert_eq!(
+            polygons,
+            [
+                (Some(Part::Wall), Lods::Highest, 2),
+                (Some(Part::Roof), Lods::Lod2, 2),
+            ]
+        );
     }
 
     #[test]

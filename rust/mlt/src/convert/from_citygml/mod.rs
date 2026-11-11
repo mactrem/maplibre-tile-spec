@@ -1,12 +1,19 @@
 //! `mlt convert <citygml> <dir>`: tile the buildings of `CityGML` files into an MLT `z/x/y.mlt`
 //! tree of v2 `Meshes` layers (XYZ scheme, `y = 0` at the north).
 //!
-//! Each building, bridge or tunnel becomes one mesh at the highest LOD of each of its parts,
-//! reprojected from its file's `srsName`. As `docs/specification/v2.md` asks, a mesh is stored
-//! whole in the tile of each zoom that holds the centre of its bounding box, and its z values are
-//! heights above its lowest vertex. Its vertices are welded on the tile's grid, and each triangle
-//! carries the `part` m-value of the semantic surface it lies in: wall, roof, ground, window or
-//! door. A surface without semantics is a roof where it faces up and a wall otherwise.
+//! Each building, bridge or tunnel becomes one mesh per zoom, reprojected from its file's
+//! `srsName`. As `docs/specification/v2.md` asks, a mesh is stored whole in the tile of each zoom
+//! that holds the centre of its bounding box, and its z values are heights above its lowest
+//! vertex. Its vertices are welded on the tile's grid, and each triangle carries the `part`
+//! m-value of the semantic surface it lies in: wall, roof, ground, window or door. A surface
+//! without semantics is a roof where it faces up and a wall otherwise.
+//!
+//! The highest zoom holds the highest LOD of each part of a building. The zoom below holds its
+//! LOD2: the highest LOD of 2 or less of each part, or else its highest LOD without windows, doors,
+//! installations and holes, its vertices clustered in cells of half a pixel. Lower zooms hold a
+//! block: the outline of its ground, or its bounding box without one, clustered in cells of a
+//! pixel and raised from 0 to its top as walls and a roof. A building under 2 pixels across has
+//! no block. A pixel is a 512th of a tile.
 //!
 //! A file whose coordinates lie far from the input's other files in the CRS it declares, but near
 //! them in the CRS most files declare, is read in the latter: some Hamburg files declare
@@ -17,7 +24,7 @@ mod parser;
 mod triangulate;
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::f64::consts::PI;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,7 +37,7 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use self::crs::{Reprojector, epsg_of_srs_name};
-use self::parser::Part;
+use self::parser::{Lods, Part};
 use super::from_geojson::{mercator_unit, tile_index};
 use super::{ConvertArgs, Reencoder};
 
@@ -46,6 +53,14 @@ const ROOF_MIN_UP: f64 = 0.34;
 /// How far, in degrees, a file must lie from the input's other files in the CRS it declares to
 /// be read in the CRS most files declare.
 const MISLABELLED_MIN_DEGREES: f64 = 1.0;
+/// The pixels across a tile that the detail of zooms below the highest is measured in.
+const TILE_PIXELS: f64 = 512.0;
+/// The cell, in pixels, the LOD2 mesh one zoom below the highest clusters its vertices in.
+const LOD2_CELL_PIXELS: f64 = 0.5;
+/// The cell, in pixels, a block clusters the corners of its footprint in.
+const BLOCK_CELL_PIXELS: f64 = 1.0;
+/// The longer side of its bounding box, in pixels, under which a building has no block.
+const BLOCK_MIN_PIXELS: f64 = 2.0;
 
 /// Whether `path` is a `CityGML` file, or a directory whose first `.gml` file comes before any tile.
 pub(super) fn is_citygml(path: &Path) -> bool {
@@ -73,6 +88,7 @@ fn is_gml(path: &Path) -> bool {
 /// A surface of one part, with geodetic positions: longitude and latitude in radians, and metres up.
 struct Surface {
     part: Part,
+    lods: Lods,
     positions: Vec<[f64; 3]>,
     triangles: Vec<[u32; 3]>,
 }
@@ -219,6 +235,7 @@ fn read(path: &Path, epsg: Option<u16>) -> AnyResult<Option<File>> {
             reprojector.to_geodetic(&mut positions)?;
             surfaces.push(Surface {
                 part,
+                lods: polygon.lods,
                 positions,
                 triangles,
             });
@@ -308,6 +325,15 @@ impl Tile {
         Self { zoom, x, y }
     }
 
+    /// The metres across the middle of the tile.
+    fn width(self) -> f64 {
+        let n = f64::from(1_u32 << self.zoom);
+        let lat = (PI * (1.0 - 2.0 * (f64::from(self.y) + 0.5) / n))
+            .sinh()
+            .atan();
+        EARTH_CIRCUMFERENCE * lat.cos() / n
+    }
+
     /// The extent whose unit is between 1 and 2 cm across the middle of the tile.
     #[expect(
         clippy::cast_possible_truncation,
@@ -315,12 +341,7 @@ impl Tile {
         reason = "the exponent is clamped to 6..=21"
     )]
     fn extent(self) -> u32 {
-        let n = f64::from(1_u32 << self.zoom);
-        let lat = (PI * (1.0 - 2.0 * (f64::from(self.y) + 0.5) / n))
-            .sinh()
-            .atan();
-        let width = EARTH_CIRCUMFERENCE * lat.cos() / n;
-        let exponent = (width / UNIT_METRES).log2().floor().clamp(6.0, 21.0) as u32;
+        let exponent = (self.width() / UNIT_METRES).log2().floor().clamp(6.0, 21.0) as u32;
         (1 << exponent).min(MAX_EXTENT)
     }
 
@@ -358,12 +379,12 @@ struct Mesh {
 impl Mesh {
     /// Welds `surfaces`, `points` holding each one's vertices on the grid, so that surfaces share
     /// the vertices they meet at. Vertices keep their order, and those no triangle names are dropped.
-    fn weld(surfaces: &[Surface], points: &[Vec<[i32; 3]>]) -> Self {
+    fn weld<'a>(surfaces: impl IntoIterator<Item = &'a Surface>, points: &[Vec<[i32; 3]>]) -> Self {
         let mut ids: HashMap<[i32; 3], u32> = HashMap::new();
         let mut welded = Vec::new();
         let mut triangles = Vec::new();
         let mut parts = Vec::new();
-        for (surface, points) in surfaces.iter().zip(points) {
+        for (surface, points) in surfaces.into_iter().zip(points) {
             let local: Vec<u32> = points
                 .iter()
                 .map(|&p| {
@@ -404,32 +425,87 @@ impl Mesh {
     }
 }
 
-/// `building` on the tile of each of `zooms` that holds the centre of its bounding box.
+/// `building` on the tile of each of `zooms` that holds the centre of its bounding box: at its
+/// highest LOD at the highest zoom, at LOD2 one zoom below and as a block below that.
 /// A zoom is left out where the building has no triangle or does not fit the tile's grid.
 fn place(
     building: &Building,
     zooms: std::ops::RangeInclusive<u8>,
     z_step: ZStep,
 ) -> Vec<(Tile, Mesh)> {
-    let positions = || building.surfaces.iter().flat_map(|s| &s.positions);
-    let fold =
-        |f: fn(f64, f64) -> f64, i: usize, init: f64| positions().map(|p| p[i]).fold(init, f);
-    let [west, south, ground] = [0, 1, 2].map(|i| fold(f64::min, i, f64::INFINITY));
-    let [east, north] = [0, 1].map(|i| fold(f64::max, i, f64::NEG_INFINITY));
-    let centre = unit(f64::midpoint(west, east), f64::midpoint(south, north));
-    let units: Vec<Vec<[f64; 2]>> = building
-        .surfaces
-        .iter()
-        .map(|s| s.positions.iter().map(|p| unit(p[0], p[1])).collect())
-        .collect();
+    let max_zoom = *zooms.end();
+    let highest = View::new(building.surfaces.iter().filter(|s| s.lods != Lods::Lod2));
+    let lod2 = (zooms.start() < zooms.end())
+        .then(|| View::new(building.surfaces.iter().filter(|s| s.lods != Lods::Highest)))
+        .flatten();
     let mut placed = Vec::new();
     for zoom in zooms {
-        let tile = Tile::of(centre, zoom);
+        let below = max_zoom - zoom;
+        let Some(view) = (if below == 0 { &highest } else { &lod2 }) else {
+            continue;
+        };
+        let tile = Tile::of(view.centre, zoom);
         let extent = tile.extent();
-        let points: Option<Vec<Vec<[i32; 3]>>> = building
-            .surfaces
+        let Some(points) = view.points(tile, extent, z_step) else {
+            continue;
+        };
+        let pixel = f64::from(extent) / TILE_PIXELS;
+        let mesh = match below {
+            0 => Some(Mesh::weld(view.surfaces.iter().copied(), &points)),
+            1 => {
+                let z = tile.width() / TILE_PIXELS / z_step.metres();
+                let cell = [pixel, pixel, z].map(|c| c * LOD2_CELL_PIXELS);
+                Some(cluster(&view.surfaces, &points, cell))
+            }
+            _ => block(&view.surfaces, &points, pixel),
+        };
+        if let Some(mesh) = mesh.filter(|m| !m.triangles.is_empty()) {
+            placed.push((tile, mesh));
+        }
+    }
+    placed
+}
+
+/// Some surfaces of a building, the centre of their bounding box in Web Mercator units of
+/// [`unit()`], and their lowest height.
+struct View<'a> {
+    surfaces: Vec<&'a Surface>,
+    units: Vec<Vec<[f64; 2]>>,
+    centre: [f64; 2],
+    ground: f64,
+}
+
+impl<'a> View<'a> {
+    /// `None` without a surface.
+    fn new(surfaces: impl Iterator<Item = &'a Surface>) -> Option<Self> {
+        let surfaces: Vec<&Surface> = surfaces.collect();
+        if surfaces.is_empty() {
+            return None;
+        }
+        let positions = || surfaces.iter().flat_map(|s| &s.positions);
+        let fold =
+            |f: fn(f64, f64) -> f64, i: usize, init: f64| positions().map(|p| p[i]).fold(init, f);
+        let [west, south, ground] = [0, 1, 2].map(|i| fold(f64::min, i, f64::INFINITY));
+        let [east, north] = [0, 1].map(|i| fold(f64::max, i, f64::NEG_INFINITY));
+        let centre = unit(f64::midpoint(west, east), f64::midpoint(south, north));
+        let units = surfaces
             .iter()
-            .zip(&units)
+            .map(|s| s.positions.iter().map(|p| unit(p[0], p[1])).collect())
+            .collect();
+        Some(Self {
+            surfaces,
+            units,
+            centre,
+            ground,
+        })
+    }
+
+    /// The vertices of each surface on `tile`'s grid of `extent`, z above the ground, or `None`
+    /// if one does not fit.
+    fn points(&self, tile: Tile, extent: u32, z_step: ZStep) -> Option<Vec<Vec<[i32; 3]>>> {
+        self.surfaces
+            .iter()
+            .zip(&self.units)
             .map(|(surface, units)| {
                 surface
                     .positions
@@ -437,20 +513,139 @@ fn place(
                     .zip(units)
                     .map(|(p, &u)| {
                         let [x, y] = tile.grid(u, extent)?;
-                        Some([x, y, z_step.z(p[2] - ground)?])
+                        Some([x, y, z_step.z(p[2] - self.ground)?])
                     })
                     .collect()
             })
-            .collect();
-        let Some(points) = points else {
-            continue;
-        };
-        let mesh = Mesh::weld(&building.surfaces, &points);
-        if !mesh.triangles.is_empty() {
-            placed.push((tile, mesh));
-        }
+            .collect()
     }
-    placed
+}
+
+/// `surfaces` with each of their `points` moved to the nearest multiple of `cell` in x, y and z,
+/// welded, keeping one of the triangles that wind alike through the same vertices.
+fn cluster(surfaces: &[&Surface], points: &[Vec<[i32; 3]>], cell: [f64; 3]) -> Mesh {
+    let snapped: Vec<Vec<[i32; 3]>> = points
+        .iter()
+        .map(|p| {
+            p.iter()
+                .map(|v| [0, 1, 2].map(|i| snap(v[i], cell[i])))
+                .collect()
+        })
+        .collect();
+    let mut mesh = Mesh::weld(surfaces.iter().copied(), &snapped);
+    let mut seen = HashSet::new();
+    (mesh.triangles, mesh.parts) = mesh
+        .triangles
+        .iter()
+        .zip(&mesh.parts)
+        .filter(|&(&[a, b, c], _)| {
+            seen.insert(if b < a && b < c {
+                [b, c, a]
+            } else if c < a && c < b {
+                [c, a, b]
+            } else {
+                [a, b, c]
+            })
+        })
+        .map(|(&t, &p)| (t, p))
+        .unzip();
+    mesh
+}
+
+/// The block of `surfaces` at `points` on a grid of `pixel` units per pixel: the outline of
+/// their ground or, without one, their bounding box, its corners clustered, raised from 0 to
+/// their top. Its walls and roof face out, and it has no bottom.
+/// `None` if the longer side of their bounding box is under [`BLOCK_MIN_PIXELS`].
+fn block(surfaces: &[&Surface], points: &[Vec<[i32; 3]>], pixel: f64) -> Option<Mesh> {
+    let (min, max) =
+        points
+            .iter()
+            .flatten()
+            .fold(([i32::MAX; 3], [i32::MIN; 3]), |(min, max), p| {
+                (
+                    [0, 1, 2].map(|i| min[i].min(p[i])),
+                    [0, 1, 2].map(|i| max[i].max(p[i])),
+                )
+            });
+    let side = |i: usize| f64::from(max[i]) - f64::from(min[i]);
+    if side(0).max(side(1)) < BLOCK_MIN_PIXELS * pixel {
+        return None;
+    }
+    let cell = BLOCK_CELL_PIXELS * pixel;
+    let (grounds, flat): (Vec<&Surface>, Vec<Vec<[i32; 3]>>) = surfaces
+        .iter()
+        .zip(points)
+        .filter(|(s, _)| s.part == Part::Ground)
+        .map(|(&s, p)| {
+            let flat = p.iter().map(|&[x, y, _]| [snap(x, cell), snap(y, cell), 0]);
+            (s, flat.collect())
+        })
+        .unzip();
+    let ground = Mesh::weld(grounds, &flat);
+    let mut xyz = ground.xyz;
+    let mut triangles = facing_down(&xyz, &ground.triangles);
+    if triangles.is_empty() {
+        xyz = vec![
+            [min[0], min[1], 0],
+            [max[0], min[1], 0],
+            [max[0], max[1], 0],
+            [min[0], max[1], 0],
+        ];
+        triangles = facing_down(&xyz, &[[0, 1, 2], [0, 2, 3]]);
+    }
+    let edges = |&[a, b, c]: &[u32; 3]| [[a, b], [b, c], [c, a]];
+    let mut uses: HashMap<[u32; 2], u32> = HashMap::new();
+    for [a, b] in triangles.iter().flat_map(edges) {
+        *uses.entry([a.min(b), a.max(b)]).or_default() += 1;
+    }
+    let n = u32::try_from(xyz.len()).ok()?;
+    let surface = |part, triangles| Surface {
+        part,
+        lods: Lods::Both,
+        positions: Vec::new(),
+        triangles,
+    };
+    let walls = triangles
+        .iter()
+        .flat_map(edges)
+        .filter(|&[a, b]| uses.get(&[a.min(b), a.max(b)]) == Some(&1))
+        .flat_map(|[a, b]| [[b, a, a + n], [b, a + n, b + n]])
+        .collect();
+    let roof = triangles.iter().map(|&[a, b, c]| [a + n, c + n, b + n]);
+    let mut raised = xyz.clone();
+    raised.extend(xyz.iter().map(|&[x, y, _]| [x, y, max[2]]));
+    Some(Mesh::weld(
+        &[
+            surface(Part::Wall, walls),
+            surface(Part::Roof, roof.collect()),
+        ],
+        &[raised.clone(), raised],
+    ))
+}
+
+/// The `triangles` between flat `xyz` that have an area, each turned to face down.
+fn facing_down(xyz: &[[i32; 3]], triangles: &[[u32; 3]]) -> Vec<[u32; 3]> {
+    // The grid's y points south, so a triangle facing down turns from +x towards +y.
+    triangles
+        .iter()
+        .filter_map(|&[a, b, c]| {
+            let [pa, pb, pc] = [a, b, c].map(|i| xyz[i as usize].map(i128::from));
+            match ((pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0])).signum() {
+                1 => Some([a, b, c]),
+                -1 => Some([a, c, b]),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// The multiple of `cell` nearest `v`, which is `v` for a cell under 1.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the multiple is within a cell of an i32, and saturates past it"
+)]
+fn snap(v: i32, cell: f64) -> i32 {
+    ((f64::from(v) / cell).round_ties_even() * cell).round() as i32
 }
 
 /// The layer of a tile's meshes, each with its feature id and building.
@@ -492,13 +687,21 @@ mod tests {
         assert_eq!(extents, [65536, 32768, 16384]);
     }
 
-    #[test]
-    fn surfaces_share_their_welded_vertices_and_each_triangle_keeps_its_part() {
-        let surface = |part, triangles| Surface {
+    fn surface(part: Part, triangles: Vec<[u32; 3]>) -> Surface {
+        Surface {
             part,
+            lods: Lods::Both,
             positions: Vec::new(),
             triangles,
-        };
+        }
+    }
+
+    fn count(mesh: &Mesh, part: Part) -> usize {
+        mesh.parts.iter().filter(|&&p| p == part).count()
+    }
+
+    #[test]
+    fn surfaces_share_their_welded_vertices_and_each_triangle_keeps_its_part() {
         let surfaces = [
             surface(Part::Wall, vec![[0, 1, 2]]),
             surface(Part::Roof, vec![[0, 2, 1], [0, 0, 1], [3, 3, 3]]),
@@ -511,6 +714,98 @@ mod tests {
         assert_eq!(mesh.xyz, [[0, 0, 0], [5, 0, 0], [0, 5, 0], [5, 5, 0]]);
         assert_eq!(mesh.triangles, [[0, 1, 2], [1, 2, 3]]);
         assert_eq!(mesh.parts, [Part::Wall, Part::Roof]);
+    }
+
+    #[test]
+    fn clustering_collapses_edges_under_a_cell_and_keeps_one_of_triangles_winding_alike() {
+        let wall = surface(Part::Wall, vec![[0, 1, 2], [1, 3, 2], [1, 2, 0], [2, 1, 0]]);
+        let points = [vec![[0, 0, 0], [100, 0, 0], [0, 0, 100], [104, 0, 3]]];
+        let mesh = cluster(&[&wall], &points, [10.0, 10.0, 10.0]);
+        assert_eq!(mesh.xyz, [[0, 0, 0], [100, 0, 0], [0, 0, 100]]);
+        assert_eq!(mesh.triangles, [[0, 1, 2], [2, 1, 0]]);
+    }
+
+    #[test]
+    fn a_block_raises_the_outline_of_its_ground_closed_but_for_its_bottom_and_facing_out() {
+        // A square facing down in four triangles around its centre, under a roof 7 units up.
+        let ground = surface(
+            Part::Ground,
+            vec![[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]],
+        );
+        let roof = surface(Part::Roof, vec![[0, 1, 2]]);
+        let points = [
+            vec![
+                [0, 0, 0],
+                [100, 0, 0],
+                [100, 100, 0],
+                [0, 100, 0],
+                [50, 50, 0],
+            ],
+            vec![[0, 0, 7], [100, 0, 7], [0, 100, 7]],
+        ];
+        let mesh = block(&[&ground, &roof], &points, 1.0).unwrap();
+        assert_eq!(mesh.xyz.len(), 9);
+        assert_eq!([count(&mesh, Part::Wall), count(&mesh, Part::Roof)], [8, 4]);
+
+        let edges: Vec<[u32; 2]> = mesh
+            .triangles
+            .iter()
+            .flat_map(|&[a, b, c]| [[a, b], [b, c], [c, a]])
+            .collect();
+        let uses = |edge: [u32; 2]| edges.iter().filter(|&&e| e == edge).count();
+        for &[a, b] in &edges {
+            let bottom = mesh.xyz[a as usize][2] == 0 && mesh.xyz[b as usize][2] == 0;
+            assert_eq!(uses([b, a]), usize::from(!bottom), "{a} {b}");
+            assert_eq!(uses([a, b]), 1, "{a} {b}");
+        }
+
+        // In (x, -y, z), each triangle winds counter-clockwise seen from outside.
+        let xyz: Vec<[i64; 3]> = mesh
+            .xyz
+            .iter()
+            .map(|&[x, y, z]| [x, -y, z].map(i64::from))
+            .collect();
+        let len = i64::try_from(xyz.len()).unwrap();
+        let centre = [0, 1, 2].map(|i| xyz.iter().map(|p| p[i]).sum::<i64>() / len);
+        for triangle in &mesh.triangles {
+            let [first, second, third] = triangle.map(|i| xyz[i as usize]);
+            let [along, across] = [second, third].map(|p| [0, 1, 2].map(|i| p[i] - first[i]));
+            let normal = [
+                along[1] * across[2] - along[2] * across[1],
+                along[2] * across[0] - along[0] * across[2],
+                along[0] * across[1] - along[1] * across[0],
+            ];
+            let outwards: i64 = (0..3).map(|i| normal[i] * (first[i] - centre[i])).sum();
+            assert!(outwards > 0, "{triangle:?} faces inwards");
+        }
+    }
+
+    #[test]
+    fn a_block_without_ground_area_is_its_bounding_box_and_none_under_two_pixels() {
+        let roof = surface(Part::Roof, vec![[0, 1, 2]]);
+        let line = surface(Part::Ground, vec![[0, 1, 2]]);
+        let points = [
+            vec![[0, 0, 5], [30, 0, 5], [0, 20, 9]],
+            vec![[0, 0, 5], [30, 0, 5], [15, 0, 5]],
+        ];
+        let mesh = block(&[&roof, &line], &points, 10.0).unwrap();
+        let mut xyz = mesh.xyz.clone();
+        xyz.sort_unstable();
+        assert_eq!(
+            xyz,
+            [
+                [0, 0, 0],
+                [0, 0, 9],
+                [0, 20, 0],
+                [0, 20, 9],
+                [30, 0, 0],
+                [30, 0, 9],
+                [30, 20, 0],
+                [30, 20, 9]
+            ]
+        );
+        assert_eq!([count(&mesh, Part::Wall), count(&mesh, Part::Roof)], [8, 2]);
+        assert!(block(&[&roof, &line], &points, 16.0).is_none());
     }
 
     #[test]
