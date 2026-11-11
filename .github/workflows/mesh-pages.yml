@@ -1,7 +1,8 @@
 name: Publish the meshes viewer
 
 # Deploys mlt-wasm/viewer/meshes.html with a CityGML extract tiled by `mlt convert`, so that a
-# reviewer of the Meshes layout can open it. Pages of the repository must be set to deploy from
+# reviewer of the Meshes layout can open it, or with all of Hamburg where the repository has a
+# release holding that archive. Pages of the repository must be set to deploy from
 # GitHub Actions, and its github-pages environment must allow this branch.
 
 on:
@@ -36,6 +37,31 @@ jobs:
         env:
           GML: ${{ inputs.gml || '../test/fixtures/meshes/buildings.gml' }}
         run: just -v rust::mesh-site "$GML" target/mesh-site
+
+      # Too large for the repository, the archive is an asset of a release of it, which a fork may have
+      - name: Show the Hamburg archive instead, if the repository has a release of it
+        if: inputs.gml == ''
+        working-directory: rust/target/mesh-site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: hamburg-lod-data
+          ARCHIVE: hamburg_v3_lod.pmtiles
+          SHA256: 859324938bccb9c923cdb59056c267e6b00f96565b27cd0a1f05f7d3f90365e8
+          ATTRIBUTION: >-
+            Buildings: Freie und Hansestadt Hamburg, Landesbetrieb Geoinformation und Vermessung (LGV),
+            3D-Gebäudemodell LoD3.0-HH https://suche.transparenz.hamburg.de/dataset/3d-gebaeudemodell-lod3-0-hh-hamburg17
+            · dl-de/by-2-0 https://www.govdata.de/dl-de/by-2-0
+            · changed: tiled by mlt convert, and simplified below the highest zoom
+        run: |
+          if ! gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" > /dev/null; then
+            echo "No release $RELEASE, so the site shows the extract"
+            exit 0
+          fi
+          gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern "$ARCHIVE"
+          echo "$SHA256  $ARCHIVE" | sha256sum -c
+          attribution=$(jq -rn --arg text "$ATTRIBUTION" '$text | @uri')
+          printf '<!doctype html><meta http-equiv="refresh" content="0; url=viewer/meshes.html?url=../%s&amp;attribution=%s">\n' \
+            "$ARCHIVE" "$attribution" > index.html
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with: { path: rust/target/mesh-site }

@@ -10,7 +10,8 @@
                     JSON array of "z/x/y" strings, or
     ?url=<archive>  for a .pmtiles archive, read by range requests, or downloaded whole from a
                     server that answers none, such as `python -m http.server`.
-  A .pmtiles file can also be picked or dropped on the page.
+  A .pmtiles file can also be picked or dropped on the page. Add &attribution=<text> to credit the
+  data, its https URLs shown as links.
 
   Drag to pan, right-drag or drag with two fingers to turn and pitch. Click a building for its
   properties, double-click it to turn around it. The tiles are tinted by the level of detail
@@ -34,6 +35,9 @@
   #fog { vertical-align: middle; width: 160px; }
   #legend span, #lodLegend span { display: inline-block; width: 10px; height: 10px; margin: 0 4px 0 8px; }
   #stats { position: absolute; left: 8px; bottom: 8px; padding: 2px 6px; background: #000a; border-radius: 4px; white-space: pre; font: 11px ui-monospace, monospace; pointer-events: none; }
+  #attribution { position: absolute; left: 8px; bottom: 44px; max-width: min(480px, calc(100vw - 28px)); padding: 2px 6px; background: #000a; border-radius: 4px; font-size: 11px; }
+  #attribution:empty { display: none; }
+  #attribution a { color: #9cf; }
   #drop { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; font-size: 24px; background: #0008; pointer-events: none; }
   body.dragging #drop { display: flex; }
 </style>
@@ -59,6 +63,7 @@
   <div id="picked"></div>
 </details>
 <div id="stats"></div>
+<div id="attribution"></div>
 <div id="drop">Drop the .pmtiles file</div>
 <script type="module">
 import * as THREE from "three";
@@ -674,6 +679,12 @@ addEventListener("drop", (e) => {
   if (file) open(archiveTiles(new FileSource(file), file.name));
 });
 const params = new URLSearchParams(location.search);
+$("attribution").replaceChildren(...(params.get("attribution") ?? "").split(/(https:\/\/\S+)/).map((text, i) => {
+  if (i % 2 === 0) return text;
+  const link = document.createElement("a");
+  link.href = link.textContent = text;
+  return link;
+}));
 if (params.has("tiles")) open(directoryTiles(params.get("tiles")));
 else if (params.has("url")) open(urlSource(params.get("url")).then((source) => archiveTiles(source, params.get("url"))));
 </script>

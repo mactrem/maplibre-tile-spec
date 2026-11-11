@@ -220,7 +220,8 @@ tile by the level of detail `mlt convert` writes at its zoom, and fades the far 
 that a slider thickens, which also draws fewer tiles, as none is drawn past where it turns opaque.
 Build it with
 `npm run build:web`, which writes `pkg-web/`, serve this directory and open
-`viewer/meshes.html?tiles=<base>` or `viewer/meshes.html?url=<archive>`. `just rust::mesh-site`
+`viewer/meshes.html?tiles=<base>` or `viewer/meshes.html?url=<archive>`, adding
+`&attribution=<text>` to credit the data. `just rust::mesh-site`
 builds the same as a static site over a `CityGML` input.
 
 ## Annotate
