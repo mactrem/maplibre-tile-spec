@@ -15,6 +15,7 @@ mlt-wasm/
 │   ├── annotate.ts    # annotated-dump wire contract
 │   ├── columns.ts     # typed-array layers, as decoded
 │   └── vectorTile.ts  # VectorTileLike wrapper over columns.ts
+├── viewer/meshes.html # three.js viewer of v2 Meshes tiles
 ├── pkg/               # wasm-pack output (gitignored)
 ├── dist/              # tsc output (gitignored)
 ├── Cargo.toml
@@ -209,6 +210,14 @@ for (const [name, layer] of Object.entries(tile.layers)) {
     }
 }
 ```
+
+### Meshes viewer
+
+`viewer/meshes.html` draws the v2 `Meshes` layers of a `.pmtiles` archive or of a directory of
+`z/x/y.mlt` tiles. As on a pitched map, it draws the tiles near the camera at the highest zoom and
+the farther ones at lower zooms, within a triangle budget that is lower on phones. Build it with
+`npm run build:web`, which writes `pkg-web/`, serve this directory and open
+`viewer/meshes.html?tiles=<base>` or `viewer/meshes.html?url=<archive>`.
 
 ## Annotate
 
