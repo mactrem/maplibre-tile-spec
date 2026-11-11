@@ -133,6 +133,34 @@ fn assert_box(feature: &TileFeature, gml_id: &str, top: i32, parts: [usize; 3]) 
 }
 
 #[test]
+fn a_file_naming_the_wrong_utm_zone_is_read_in_that_of_the_others() {
+    let dir = TempDir::new();
+    let input = dir.0.join("in");
+    let output = dir.0.join("out");
+    fs::create_dir(&input).unwrap();
+    let xml = fs::read_to_string(BUILDINGS).unwrap();
+    fs::write(input.join("a.gml"), &xml).unwrap();
+    fs::write(input.join("b.gml"), &xml).unwrap();
+    fs::write(input.join("c.gml"), xml.replace("EPSG:25832", "EPSG:25833")).unwrap();
+    convert(&input, &output, &TILED).unwrap();
+    for zoom in ["15", "16"] {
+        assert_eq!(
+            fs::read_dir(output.join(zoom)).unwrap().count(),
+            1,
+            "{zoom}"
+        );
+    }
+    let bytes = fs::read(output.join("16/34588/21180.mlt")).unwrap();
+    let layer = Parser::default()
+        .parse_layers(&bytes)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let layer = layer.into_tile(&mut Decoder::default()).unwrap().unwrap();
+    assert_eq!(layer.feature_count(), 6);
+}
+
+#[test]
 fn citygml_input_rejects_flags_it_cannot_honour_and_srs_names_it_cannot_read() {
     let dir = TempDir::new();
     let input = Path::new(BUILDINGS);

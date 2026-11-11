@@ -7,11 +7,16 @@
 //! heights above its lowest vertex. Its vertices are welded on the tile's grid, and each triangle
 //! carries the `part` m-value of the semantic surface it lies in: wall, roof, ground, window or
 //! door. A surface without semantics is a roof where it faces up and a wall otherwise.
+//!
+//! A file whose coordinates lie far from the input's other files in the CRS it declares, but near
+//! them in the CRS most files declare, is read in the latter: some Hamburg files declare
+//! EPSG:25833 for UTM zone 32 coordinates.
 
 mod crs;
 mod parser;
 mod triangulate;
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::PI;
 use std::fs;
@@ -38,6 +43,9 @@ const MAX_EXTENT: u32 = 1 << 21;
 /// The up component of a unit normal above which a surface without semantics is a roof, about
 /// 70 degrees from vertical.
 const ROOF_MIN_UP: f64 = 0.34;
+/// How far, in degrees, a file must lie from the input's other files in the CRS it declares to
+/// be read in the CRS most files declare.
+const MISLABELLED_MIN_DEGREES: f64 = 1.0;
 
 /// Whether `path` is a `CityGML` file, or a directory whose first `.gml` file comes before any tile.
 pub(super) fn is_citygml(path: &Path) -> bool {
@@ -74,6 +82,13 @@ struct Building {
     surfaces: Vec<Surface>,
 }
 
+/// The buildings of a file, the CRS they were read in and the file's first position in it.
+struct File {
+    epsg: u16,
+    first: [f64; 3],
+    buildings: Vec<Building>,
+}
+
 /// Tile the `CityGML` file or directory `args.input` into the directory `args.output`.
 /// [`super::convert`] has already checked the flags and that the output does not exist.
 pub(super) fn convert(args: &ConvertArgs, reencoder: &Reencoder) -> AnyResult<()> {
@@ -83,11 +98,31 @@ pub(super) fn convert(args: &ConvertArgs, reencoder: &Reencoder) -> AnyResult<()
     let z_step = ZStep::above_ground(args.z_step.unwrap_or(DEFAULT_Z_STEP))?;
 
     let files = files(input)?;
-    let read: Vec<Vec<Building>> = files
+    let mut parsed: Vec<Option<File>> = files
         .par_iter()
-        .map(|path| read(path).with_context(|| format!("reading {}", path.display())))
+        .map(|path| read(path, None).with_context(|| format!("reading {}", path.display())))
         .collect::<AnyResult<_>>()?;
-    let buildings: Vec<Building> = read.into_iter().flatten().collect();
+    let reread: Vec<(usize, Option<File>)> = mislabelled(&parsed)?
+        .into_par_iter()
+        .map(|(i, declared, epsg)| {
+            let path = &files[i];
+            eprintln!(
+                "warning: {} names EPSG:{declared}, but its coordinates lie near the other files in EPSG:{epsg}, so it is read in that",
+                path.display(),
+            );
+            let file = read(path, Some(epsg))
+                .with_context(|| format!("reading {}", path.display()))?;
+            Ok((i, file))
+        })
+        .collect::<AnyResult<_>>()?;
+    for (i, file) in reread {
+        parsed[i] = file;
+    }
+    let buildings: Vec<Building> = parsed
+        .into_iter()
+        .flatten()
+        .flat_map(|f| f.buildings)
+        .collect();
 
     let mut tiles: BTreeMap<Tile, Vec<(u64, &Building, Mesh)>> = BTreeMap::new();
     for (id, building) in (0..).zip(&buildings) {
@@ -134,18 +169,31 @@ fn files(input: &Path) -> AnyResult<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// The buildings of the `CityGML` file at `path`, triangulated and reprojected.
-fn read(path: &Path) -> AnyResult<Vec<Building>> {
+/// The buildings of the `CityGML` file at `path`, triangulated and reprojected from `epsg` or,
+/// without it, from the file's `srsName`. `None` if the file holds no position.
+fn read(path: &Path, epsg: Option<u16>) -> AnyResult<Option<File>> {
     let bytes = fs::read(path)?;
     let document = parser::parse(&bytes)?;
     if document.buildings.is_empty() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
-    let srs_name = document
-        .srs_name
-        .context("the file names no CRS in an srsName")?;
-    let epsg = epsg_of_srs_name(&srs_name)
-        .with_context(|| format!("the srsName {srs_name:?} names no EPSG code"))?;
+    let epsg = if let Some(epsg) = epsg {
+        epsg
+    } else {
+        let srs_name = document
+            .srs_name
+            .context("the file names no CRS in an srsName")?;
+        epsg_of_srs_name(&srs_name)
+            .with_context(|| format!("the srsName {srs_name:?} names no EPSG code"))?
+    };
+    let Some(first) = document
+        .buildings
+        .iter()
+        .flat_map(|b| &b.polygons)
+        .find_map(|p| p.points.first().copied())
+    else {
+        return Ok(None);
+    };
     let reprojector = Reprojector::new(epsg)?;
     let mut buildings = Vec::with_capacity(document.buildings.len());
     for building in document.buildings {
@@ -182,7 +230,66 @@ fn read(path: &Path) -> AnyResult<Vec<Building>> {
             });
         }
     }
-    Ok(buildings)
+    Ok(Some(File {
+        epsg,
+        first,
+        buildings,
+    }))
+}
+
+/// The index of each of `files` whose first position lies more than [`MISLABELLED_MIN_DEGREES`]
+/// from the median of those of the files in the CRS most of them declare, but less than a quarter
+/// as far when read in that CRS, with the CRS it declares and that CRS.
+fn mislabelled(files: &[Option<File>]) -> AnyResult<Vec<(usize, u16, u16)>> {
+    let mut counts: BTreeMap<u16, usize> = BTreeMap::new();
+    for file in files.iter().flatten() {
+        *counts.entry(file.epsg).or_default() += 1;
+    }
+    let Some((&common, _)) = counts.iter().max_by_key(|&(&epsg, &n)| (n, Reverse(epsg))) else {
+        return Ok(Vec::new());
+    };
+    if counts.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let reprojectors: BTreeMap<u16, Reprojector> = counts
+        .keys()
+        .map(|&epsg| Ok((epsg, Reprojector::new(epsg)?)))
+        .collect::<AnyResult<_>>()?;
+    let degrees = |epsg: u16, p: [f64; 3]| {
+        let mut points = [p];
+        reprojectors[&epsg].to_geodetic(&mut points).ok()?;
+        Some([points[0][0].to_degrees(), points[0][1].to_degrees()])
+    };
+    let (mut lons, mut lats): (Vec<f64>, Vec<f64>) = files
+        .iter()
+        .flatten()
+        .filter(|f| f.epsg == common)
+        .filter_map(|f| degrees(common, f.first))
+        .map(|[lon, lat]| (lon, lat))
+        .unzip();
+    let (Some(lon), Some(lat)) = (median(&mut lons), median(&mut lats)) else {
+        return Ok(Vec::new());
+    };
+    let distance = |p: Option<[f64; 2]>| {
+        p.map_or(f64::INFINITY, |[x, y]| {
+            ((x - lon) * lat.to_radians().cos()).hypot(y - lat)
+        })
+    };
+    Ok(files
+        .iter()
+        .enumerate()
+        .filter_map(|(i, file)| {
+            let file = file.as_ref().filter(|f| f.epsg != common)?;
+            let off = distance(degrees(file.epsg, file.first));
+            let near = distance(degrees(common, file.first));
+            (off > MISLABELLED_MIN_DEGREES && near < off / 4.0).then_some((i, file.epsg, common))
+        })
+        .collect())
+}
+
+fn median(values: &mut [f64]) -> Option<f64> {
+    values.sort_unstable_by(f64::total_cmp);
+    values.get(values.len() / 2).copied()
 }
 
 /// A tile of the XYZ scheme, `y = 0` at the north.
@@ -404,5 +511,30 @@ mod tests {
         assert_eq!(mesh.xyz, [[0, 0, 0], [5, 0, 0], [0, 5, 0], [5, 5, 0]]);
         assert_eq!(mesh.triangles, [[0, 1, 2], [1, 2, 3]]);
         assert_eq!(mesh.parts, [Part::Wall, Part::Roof]);
+    }
+
+    #[test]
+    fn only_a_file_whose_coordinates_fit_the_common_crs_is_mislabelled() {
+        let file = |epsg, x, y| {
+            Some(File {
+                epsg,
+                first: [x, y, 0.0],
+                buildings: Vec::new(),
+            })
+        };
+        let hamburg = [566_100.0, 5_934_100.0];
+        let files = [
+            file(25832, hamburg[0], hamburg[1]),
+            file(25832, 567_000.0, 5_935_000.0),
+            None,
+            file(25833, hamburg[0], hamburg[1]),
+            // Berlin, in zone 33 indeed
+            file(25833, 390_000.0, 5_820_000.0),
+        ];
+        assert_eq!(mislabelled(&files).unwrap(), [(3, 25833, 25832)]);
+        assert_eq!(
+            mislabelled(&files[3..]).unwrap(),
+            [] as [(usize, u16, u16); 0]
+        );
     }
 }

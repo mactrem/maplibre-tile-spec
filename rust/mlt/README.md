@@ -79,6 +79,10 @@ holds the centre of its bounding box. Its z values are the height above its lowe
 roof, ground, window or door), so surfaces of different parts share their vertices. Each feature
 has the building's `gml_id` property. `--verify` does not compare meshes and is rejected.
 
+A file whose coordinates lie more than 1° from the input's other files in the CRS it declares,
+but near them in the CRS most files declare, is read in the latter with a warning: some Hamburg
+files declare EPSG:25833 for UTM zone 32 coordinates.
+
 ### Visualizer
 
 The visualizer command provides an interactive terminal-based UI for exploring MLT files:
