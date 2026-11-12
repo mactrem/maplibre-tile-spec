@@ -29,9 +29,9 @@ mod columns;
 #[cfg(feature = "coverage")]
 mod coverage;
 
+use mlt_core::MltError;
 #[cfg(feature = "geojson")]
 use mlt_core::geojson::FeatureCollection;
-use mlt_core::MltError;
 #[cfg(feature = "geojson")]
 use mlt_core::{Decoder, Parser};
 use wasm_bindgen::prelude::*;
