@@ -287,7 +287,9 @@ impl<'a> ColumnValues<'a> {
     /// Decode into the flat values the container holds, dropping the presence a
     /// nested leaf keeps in its own stream rather than in its column.
     pub(super) fn decode(self, dec: &mut Decoder) -> MltResult<MValues<'a>> {
-        Ok(crate::Decode::decode(RawMValueData::from(self), dec)?.into_values())
+        Ok(RawMValueData::from(self)
+            .decode_scoped(MValueScope::Vertex, dec)?
+            .into_values())
     }
 }
 

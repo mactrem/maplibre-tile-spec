@@ -7,9 +7,7 @@ use bitvec::order::Lsb0;
 use bitvec::slice::BitSlice;
 use compact_str::CompactString;
 
-use crate::decoder::{
-    GeometryValues, ParsedStrings, RawFloats, RawPresence, RawScalar, RawStrings,
-};
+use crate::decoder::{GeometryValues, ParsedStrings, RawFloats, RawScalar, RawStrings};
 use crate::tile::{MValue, MValueScope, PropKind};
 use crate::{Decode, DecodeState, Decoder, Lazy, MltError, MltResult};
 
@@ -291,78 +289,58 @@ impl<'a> Decode<ParsedMValue<'a>> for RawMValue<'a> {
     /// the way a property column's nulls do.
     #[hotpath::measure]
     fn decode(self, dec: &mut Decoder) -> MltResult<ParsedMValue<'a>> {
-        let scope = self.scope;
-        let mut column = self.data.decode(dec)?;
-        column.scope = scope;
-        Ok(column)
+        self.data.decode_scoped(self.scope, dec)
     }
 }
 
-impl<'a> Decode<ParsedMValue<'a>> for RawMValueData<'a> {
-    /// Decode into a vertex-scoped [`ParsedMValue`], charging `dec` for every heap allocation.
-    fn decode(self, dec: &mut Decoder) -> MltResult<ParsedMValue<'a>> {
+impl<'a> RawMValueData<'a> {
+    /// Decode into a [`ParsedMValue`] whose values run over `scope`, charging `dec` for every
+    /// heap allocation.
+    pub(crate) fn decode_scoped(
+        self,
+        scope: MValueScope,
+        dec: &mut Decoder,
+    ) -> MltResult<ParsedMValue<'a>> {
         use MValues as M;
 
-        Ok(match self {
-            Self::Bool(v) => parsed(v.name, v.presence, M::Bool(v.data.decode_bools(dec)?), dec)?,
-            Self::I8(v) => {
-                let values = v.data.decode_narrow::<i8, i32>(dec)?;
-                parsed(v.name, v.presence, M::I8(values), dec)?
-            }
-            Self::U8(v) => {
-                let values = v.data.decode_narrow::<u8, u32>(dec)?;
-                parsed(v.name, v.presence, M::U8(values), dec)?
-            }
-            Self::I32(v) => {
-                let values = v.data.decode_ints::<i32>(dec)?;
-                parsed(v.name, v.presence, M::I32(values), dec)?
-            }
-            Self::U32(v) => {
-                let values = v.data.decode_ints::<u32>(dec)?;
-                parsed(v.name, v.presence, M::U32(values), dec)?
-            }
-            Self::I64(v) => {
-                let values = v.data.decode_ints::<i64>(dec)?;
-                parsed(v.name, v.presence, M::I64(values), dec)?
-            }
-            Self::U64(v) => {
-                let values = v.data.decode_ints::<u64>(dec)?;
-                parsed(v.name, v.presence, M::U64(values), dec)?
-            }
+        let (name, presence, values) = match self {
+            Self::Bool(v) => (v.name, v.presence, M::Bool(v.data.decode_bools(dec)?)),
+            Self::I8(v) => (
+                v.name,
+                v.presence,
+                M::I8(v.data.decode_narrow::<i8, i32>(dec)?),
+            ),
+            Self::U8(v) => (
+                v.name,
+                v.presence,
+                M::U8(v.data.decode_narrow::<u8, u32>(dec)?),
+            ),
+            Self::I32(v) => (v.name, v.presence, M::I32(v.data.decode_ints::<i32>(dec)?)),
+            Self::U32(v) => (v.name, v.presence, M::U32(v.data.decode_ints::<u32>(dec)?)),
+            Self::I64(v) => (v.name, v.presence, M::I64(v.data.decode_ints::<i64>(dec)?)),
+            Self::U64(v) => (v.name, v.presence, M::U64(v.data.decode_ints::<u64>(dec)?)),
             Self::F32(v) => {
                 let (name, presence) = (v.name, v.presence.clone());
-                let values = v.decode_values::<f32>(dec)?;
-                parsed(name, presence, M::F32(values), dec)?
+                (name, presence, M::F32(v.decode_values::<f32>(dec)?))
             }
             Self::F64(v) => {
                 let (name, presence) = (v.name, v.presence.clone());
-                let values = v.decode_values::<f64>(dec)?;
-                parsed(name, presence, M::F64(values), dec)?
+                (name, presence, M::F64(v.decode_values::<f64>(dec)?))
             }
             Self::Str(mut v) => {
                 // A string column expands its own nulls into its lengths, which
                 // these presence bits are not: they are the feature's, not the value's.
                 let presence = std::mem::take(&mut v.presence);
-                let name = v.name;
-                parsed(name, presence, M::Str(v.decode(dec)?), dec)?
+                (v.name, presence, M::Str(v.decode(dec)?))
             }
+        };
+        Ok(ParsedMValue {
+            name,
+            scope,
+            presence: presence.decode_bits(dec)?,
+            values,
         })
     }
-}
-
-/// Assemble a column from its name, the presence bits over features, and its values.
-fn parsed<'a>(
-    name: &'a str,
-    presence: RawPresence<'a>,
-    values: MValues<'a>,
-    dec: &mut Decoder,
-) -> MltResult<ParsedMValue<'a>> {
-    Ok(ParsedMValue {
-        name,
-        scope: MValueScope::Vertex,
-        presence: presence.decode_bits(dec)?,
-        values,
-    })
 }
 
 impl RawMValue<'_> {
