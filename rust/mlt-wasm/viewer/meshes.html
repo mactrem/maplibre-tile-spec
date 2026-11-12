@@ -11,7 +11,8 @@
     ?url=<archive>  for a .pmtiles archive, read by range requests, or downloaded whole from a
                     server that answers none, such as `python -m http.server`.
   A .pmtiles file can also be picked or dropped on the page. Add &attribution=<text> to credit the
-  data, its https URLs shown as links.
+  data, its https URLs shown as links, and &quality=high, phone or low to pick the detail, which
+  is otherwise phone on a phone and high elsewhere.
 
   Drag to pan, right-drag or drag with two fingers to turn and pitch. Click a building for its
   properties, double-click it to turn around it. The tiles are tinted by the level of detail
@@ -59,6 +60,9 @@
   <label><input type="checkbox" id="byLod" checked> Tint by level of detail</label>
   <div id="lodLegend"></div>
   <label>Fog <input type="range" id="fog" min="0" max="100" value="30"></label>
+  <label>Detail <select id="quality">
+    <option value="high">high</option><option value="phone">phone</option><option value="low">low-end phone</option>
+  </select></label>
   <div id="status">Drop a .pmtiles file, or pick one.</div>
   <div id="picked"></div>
 </details>
@@ -82,24 +86,32 @@ const EARTH = 2 * Math.PI * 6378137;
 const CHILDREN = [[0, 0], [1, 0], [0, 1], [1, 1]];
 /** Metres: the highest a building reaches, and how far it reaches beyond the tile holding its centre. */
 const MAX_HEIGHT = 350, OVERHANG = 100;
-/** A tile is split into its children while it would span more than this many CSS pixels. */
-const TILE_PX = 512;
 /** Nothing is drawn farther than this many tiles of the lowest zoom. */
 const FAR_TILES = 8;
 /** The fraction of that distance drawn in the densest fog. */
 const FOG_NEAREST = 1 / 8;
 const MAX_LOADS = 6;
 const small = matchMedia("(pointer: coarse), (max-width: 600px)").matches;
-/** The triangles of the tiles in view, counted nearest first, beyond which no tile is drawn. */
-const BUDGET = small ? 1.5e6 : 5e6;
-const CACHE_TRIANGLES = 2 * BUDGET;
+/**
+ * The levels of detail to pick from: the triangles of the tiles in view, counted nearest first,
+ * beyond which no tile is drawn, the CSS pixels a tile may span before it is split into its
+ * children, and the highest device pixel ratio drawn at.
+ */
+const QUALITIES = {
+  high: { budget: 5e6, tilePx: 512, pixelRatio: 2 },
+  phone: { budget: 1.5e6, tilePx: 512, pixelRatio: 1.5 },
+  low: { budget: 3e5, tilePx: 2048, pixelRatio: 1 },
+};
 const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+$("quality").value = Object.hasOwn(QUALITIES, params.get("quality")) ? params.get("quality") : small ? "phone" : "high";
+let quality = QUALITIES[$("quality").value];
 
 // No logarithmic depth buffer, which writes gl_FragDepth and so turns off early depth tests: the
 // near plane follows the camera's distance instead. The reverseDepthBuffer of three r170 leaves
 // the clip control at -1..1, so it is not used either.
 const renderer = new THREE.WebGLRenderer({ antialias: devicePixelRatio < 1.5 });
-renderer.setPixelRatio(Math.min(devicePixelRatio, small ? 1.5 : 2));
+renderer.setPixelRatio(Math.min(devicePixelRatio, quality.pixelRatio));
 document.body.prepend(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x20232a);
@@ -272,11 +284,11 @@ function fogLimit() {
 /**
  * The tiles in view and nearer than `limit`, nearest first: from the lowest zoom, a tile nearer
  * to the camera than `refine` times its width is split into its children, so that a tile drawn
- * spans at most about `TILE_PX` pixels.
+ * spans at most about the quality's `tilePx` pixels.
  */
 function tilesInView(limit) {
   frustum.setFromProjectionMatrix(viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
-  const refine = innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * TILE_PX);
+  const refine = innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * quality.tilePx);
   const found = [];
   const visit = (t) => {
     if (!frustum.intersectsBox(tileBox(t, box))) return;
@@ -303,12 +315,12 @@ function estimate(z) {
   return loaded ? loaded.triangles / loaded.tiles : 0;
 }
 
-/** The nearest of `found` whose triangles, as loaded or estimated, fit in `BUDGET`. */
+/** The nearest of `found` whose triangles, as loaded or estimated, fit in the quality's budget. */
 function withinBudget(found) {
   let triangles = 0;
   for (const [i, t] of found.entries()) {
     triangles += cache.get(t.key)?.triangles ?? estimate(t.z);
-    if (triangles > BUDGET && i > 0) return found.slice(0, i);
+    if (triangles > quality.budget && i > 0) return found.slice(0, i);
   }
   return found;
 }
@@ -352,12 +364,12 @@ function touch(key) {
   return entry;
 }
 
-/** Drops the least recently drawn tiles, but none of `kept`, while the cache holds more than `CACHE_TRIANGLES`. */
+/** Drops the least recently drawn tiles, but none of `kept`, while the cache holds more than twice the quality's budget. */
 function evict(kept) {
   let triangles = 0;
   for (const entry of cache.values()) triangles += entry.triangles;
   for (const [key, entry] of cache) {
-    if (triangles <= CACHE_TRIANGLES) break;
+    if (triangles <= 2 * quality.budget) break;
     if (kept.has(key)) continue;
     entry.mesh?.geometry.dispose();
     cache.delete(key);
@@ -672,6 +684,12 @@ $("byPart").addEventListener("change", () => {
 });
 $("byLod").addEventListener("change", () => { showLods(); requestRender(); });
 $("fog").addEventListener("input", update);
+$("quality").addEventListener("change", () => {
+  quality = QUALITIES[$("quality").value];
+  renderer.setPixelRatio(Math.min(devicePixelRatio, quality.pixelRatio));
+  resize();
+  update();
+});
 $("file").addEventListener("change", (e) => e.target.files[0] && open(archiveTiles(new FileSource(e.target.files[0]), e.target.files[0].name)));
 addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("dragging"); });
 addEventListener("dragleave", () => document.body.classList.remove("dragging"));
@@ -681,7 +699,6 @@ addEventListener("drop", (e) => {
   const file = e.dataTransfer.files[0];
   if (file) open(archiveTiles(new FileSource(file), file.name));
 });
-const params = new URLSearchParams(location.search);
 $("attribution").replaceChildren(...(params.get("attribution") ?? "").split(/(https:\/\/\S+)/).map((text, i) => {
   if (i % 2 === 0) return text;
   const link = document.createElement("a");
