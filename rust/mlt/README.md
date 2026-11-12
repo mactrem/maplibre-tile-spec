@@ -98,8 +98,8 @@ Lower zooms hold less detail, a pixel being a 512th of a tile:
 The meshes of the highest three zooms and the blocks of 40 m or more are then simplified with
 [meshoptimizer](https://github.com/zeux/meshoptimizer), its pieces smaller than the error
 removed: within 5 cm at `--max-zoom`, and a third of a pixel below. A mesh with parts is simplified
-part by part, the vertices where they meet kept in place; a block as a whole, each triangle then a
-roof or wall by its facing.
+with the seams where they meet kept, their vertices sliding along them; a block as a whole, each
+triangle then a roof or wall by its facing.
 
 A file whose coordinates lie more than 1° from the input's other files in the CRS it declares,
 but near them in the CRS most files declare, is read in the latter with a warning: some Hamburg

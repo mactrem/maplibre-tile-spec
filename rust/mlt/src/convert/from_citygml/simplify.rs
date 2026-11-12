@@ -1,8 +1,8 @@
 //! Meshes simplified by meshoptimizer within an error in metres, removing the pieces smaller than
-//! it: part by part, the vertices where parts meet kept in place, or as a whole, each triangle
-//! then of the part its facing says.
+//! it: with the seams where parts meet kept, their vertices sliding along them, or as a whole, each
+//! triangle then of the part its facing says.
 
-use meshopt::{SimplifyOptions, simplify_decoder, simplify_with_locks_decoder};
+use meshopt::{SimplifyOptions, simplify_decoder};
 
 use super::parser::Part;
 use super::{Mesh, ROOF_MIN_UP};
@@ -10,7 +10,8 @@ use super::{Mesh, ROOF_MIN_UP};
 /// How the parts of a mesh are kept by [`simplify`].
 #[derive(Clone, Copy)]
 pub(super) enum Parts {
-    /// Each part is simplified on its own, the vertices it shares with others kept in place.
+    /// The parts are simplified together, the seams between them kept, their vertices sliding
+    /// along them.
     Seamed,
     /// The mesh is simplified as a whole, and a triangle facing up is a roof, one facing down a
     /// ground, and the others walls.
@@ -37,52 +38,43 @@ pub(super) fn simplify(mesh: &Mesh, metres: [f64; 3], error: f64, parts: Parts) 
     )]
     let error = error as f32;
     let options = SimplifyOptions::ErrorAbsolute | SimplifyOptions::Prune;
-    let indices = |part: Option<Part>| -> Vec<u32> {
-        mesh.triangles
-            .iter()
-            .zip(&mesh.parts)
-            .filter(|&(_, &p)| part.is_none_or(|part| p == part))
-            .flat_map(|(t, _)| *t)
-            .collect()
-    };
     let mut triangles = Vec::new();
     let mut kept = Vec::new();
     match parts {
         Parts::Seamed => {
-            let mut first: Vec<Option<Part>> = vec![None; mesh.xyz.len()];
-            let mut locked = vec![false; mesh.xyz.len()];
-            for (t, &part) in mesh.triangles.iter().zip(&mesh.parts) {
-                for &v in t {
-                    match first[v as usize] {
-                        None => first[v as usize] = Some(part),
-                        Some(p) if p != part => locked[v as usize] = true,
-                        Some(_) => {}
+            // Each part its own copy of a vertex it shares: meshoptimizer then keeps the seams
+            // between parts, sliding their vertices along them, and each copy names its part.
+            let mut copies: Vec<Vec<(Part, u32)>> = vec![Vec::new(); mesh.xyz.len()];
+            let mut source = Vec::new();
+            let mut part_of = Vec::new();
+            let split: Vec<u32> = mesh
+                .triangles
+                .iter()
+                .zip(&mesh.parts)
+                .flat_map(|(t, &part)| t.map(|v| (v, part)))
+                .map(|(v, part)| {
+                    let copies = &mut copies[v as usize];
+                    if let Some(&(_, copy)) = copies.iter().find(|&&(p, _)| p == part) {
+                        return copy;
                     }
-                }
-            }
-            let mut seen = Vec::new();
-            for &part in &mesh.parts {
-                if seen.contains(&part) {
-                    continue;
-                }
-                seen.push(part);
-                let simplified = simplify_with_locks_decoder(
-                    &indices(Some(part)),
-                    &positions,
-                    &locked,
-                    0,
-                    error,
-                    options,
-                    None,
-                );
-                for t in simplified.as_chunks::<3>().0 {
-                    triangles.push(*t);
-                    kept.push(part);
-                }
+                    let copy = u32::try_from(source.len()).unwrap_or(u32::MAX);
+                    copies.push((part, copy));
+                    source.push(v);
+                    part_of.push(part);
+                    copy
+                })
+                .collect();
+            let split_positions: Vec<[f32; 3]> =
+                source.iter().map(|&v| positions[v as usize]).collect();
+            let simplified = simplify_decoder(&split, &split_positions, 0, error, options, None);
+            for t in simplified.as_chunks::<3>().0 {
+                triangles.push(t.map(|copy| source[copy as usize]));
+                kept.push(part_of[t[0] as usize]);
             }
         }
         Parts::Faced => {
-            let simplified = simplify_decoder(&indices(None), &positions, 0, error, options, None);
+            let indices: Vec<u32> = mesh.triangles.iter().flatten().copied().collect();
+            let simplified = simplify_decoder(&indices, &positions, 0, error, options, None);
             for t in simplified.as_chunks::<3>().0 {
                 triangles.push(*t);
                 kept.push(facing(t.map(|i| positions[i as usize])));
@@ -172,8 +164,9 @@ mod tests {
     }
 
     #[test]
-    fn the_vertices_two_parts_share_stay() {
-        // The west half of the grid a wall, the east half a roof: the line between them stays.
+    fn the_line_two_parts_meet_on_stays() {
+        // The west half of the grid a wall, the east half a roof: the vertices on the line between
+        // them may slide along it, but each half keeps its 8 m².
         let mut mesh = grid(4, Part::Roof);
         for (t, part) in mesh.triangles.iter().zip(&mut mesh.parts) {
             if t.iter().all(|&v| mesh.xyz[v as usize][0] <= 2) {
@@ -181,15 +174,20 @@ mod tests {
             }
         }
         let simplified = simplify(&mesh, [1.0; 3], 0.05, Parts::Seamed);
-        for y in 0..=4 {
-            assert!(simplified.xyz.contains(&[2, y, 0]), "{y}");
+        assert!(simplified.triangles.len() < mesh.triangles.len());
+        for part in [Part::Wall, Part::Roof] {
+            let doubled_area: i32 = simplified
+                .triangles
+                .iter()
+                .zip(&simplified.parts)
+                .filter(|&(_, &p)| p == part)
+                .map(|(t, _)| {
+                    let [a, b, c] = t.map(|v| simplified.xyz[v as usize]);
+                    ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs()
+                })
+                .sum();
+            assert_eq!(doubled_area, 16, "{part:?}");
         }
-        let walls = simplified
-            .parts
-            .iter()
-            .filter(|&&p| p == Part::Wall)
-            .count();
-        assert!(walls > 0 && walls < simplified.parts.len());
     }
 
     #[test]
