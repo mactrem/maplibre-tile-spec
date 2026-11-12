@@ -14,7 +14,8 @@ const METRES_PER_DEGREE: f64 = EARTH_CIRCUMFERENCE / 360.0;
 /// metres east, north and up.
 ///
 /// The triangles wind like the exterior ring. Returns the polygon's normal in metres east,
-/// north and up, or `None`, adding nothing, if the exterior has no area.
+/// north and up, or `None`, adding nothing, if the exterior has no area or the points are more
+/// than a `u32` indexes.
 pub fn polygon(
     points: &[[f64; 3]],
     ends: &[usize],
@@ -56,7 +57,10 @@ pub fn polygon(
     let indices = earcutr::earcut(&flat, &ends[..ends.len() - 1], 2).ok()?;
     let start = out.len();
     for t in indices.as_chunks::<3>().0 {
-        let [a, b, c] = t.map(|i| u32::try_from(i).unwrap_or(u32::MAX));
+        let [Ok(a), Ok(b), Ok(c)] = t.map(u32::try_from) else {
+            out.truncate(start);
+            return None;
+        };
         let facing = dot(
             cross(
                 sub(points[t[1]], points[t[0]]),

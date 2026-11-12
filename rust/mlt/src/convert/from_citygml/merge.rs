@@ -80,7 +80,8 @@ pub(super) struct Merged {
 
 /// The blocks of `footprints` in cells of `cell` grid units, each group of covered cells of one
 /// height band raised from 0 to its mean top, with walls where it stands at least `min_wall` z
-/// units above its neighbours or the ground.
+/// units above its neighbours or the ground. A block of more corners than a `u32` indexes is
+/// left out.
 pub(super) fn merge(
     footprints: &[Footprint],
     cell: f64,
@@ -135,15 +136,15 @@ pub(super) fn merge(
     groups
         .into_iter()
         .zip(walls.into_iter().zip(sides))
-        .map(|((members, top), (walls, sides))| {
+        .filter_map(|((members, top), (walls, sides))| {
             let mut roof = Vec::new();
             for (outer, holes) in rings(&chains, &sides) {
                 raster.roof(&outer, &holes, top, &mut roof);
             }
-            Merged {
+            Some(Merged {
                 members,
-                mesh: weld(&walls, &roof),
-            }
+                mesh: weld(&walls, &roof)?,
+            })
         })
         .collect()
 }
@@ -627,19 +628,20 @@ fn facing(triangle: [[i32; 3]; 3], out: [i64; 3]) -> [[i32; 3]; 3] {
 }
 
 /// One mesh of `walls` and `roof`, triangles of grid positions, their shared corners welded.
-fn weld(walls: &[[[i32; 3]; 3]], roof: &[[[i32; 3]; 3]]) -> Mesh {
+/// `None` if their corners are more than a `u32` indexes.
+fn weld(walls: &[[[i32; 3]; 3]], roof: &[[[i32; 3]; 3]]) -> Option<Mesh> {
     let surface = |part, triangles: &[[[i32; 3]; 3]]| {
-        let n = u32::try_from(triangles.len()).unwrap_or(u32::MAX);
+        let corners = u32::try_from(triangles.len().checked_mul(3)?).ok()?;
         let surface = Surface {
             part,
             lods: Lods::Both,
             positions: Vec::new(),
-            triangles: (0..n).map(|t| [3 * t, 3 * t + 1, 3 * t + 2]).collect(),
+            triangles: (0..corners).step_by(3).map(|c| [c, c + 1, c + 2]).collect(),
         };
-        (surface, triangles.iter().flatten().copied().collect())
+        Some((surface, triangles.iter().flatten().copied().collect()))
     };
-    let (wall, wall_points) = surface(Part::Wall, walls);
-    let (roof, roof_points) = surface(Part::Roof, roof);
+    let (wall, wall_points) = surface(Part::Wall, walls)?;
+    let (roof, roof_points) = surface(Part::Roof, roof)?;
     Mesh::weld(&[wall, roof], &[wall_points, roof_points])
 }
 

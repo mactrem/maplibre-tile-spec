@@ -18,8 +18,9 @@ pub(super) enum Parts {
     Faced,
 }
 
-/// `mesh`, `metres` per grid unit along x, y and z, simplified within `error` metres.
-pub(super) fn simplify(mesh: &Mesh, metres: [f64; 3], error: f64, parts: Parts) -> Mesh {
+/// `mesh`, `metres` per grid unit along x, y and z, simplified within `error` metres. `None` if
+/// its vertices, one copy per part they are in, are more than a `u32` indexes.
+pub(super) fn simplify(mesh: &Mesh, metres: [f64; 3], error: f64, parts: Parts) -> Option<Mesh> {
     let Some(&origin) = mesh.xyz.first() else {
         return compact(&[], Vec::new(), Vec::new());
     };
@@ -55,15 +56,15 @@ pub(super) fn simplify(mesh: &Mesh, metres: [f64; 3], error: f64, parts: Parts) 
                 .map(|(v, part)| {
                     let copies = &mut copies[v as usize];
                     if let Some(&(_, copy)) = copies.iter().find(|&&(p, _)| p == part) {
-                        return copy;
+                        return Some(copy);
                     }
-                    let copy = u32::try_from(source.len()).unwrap_or(u32::MAX);
+                    let copy = u32::try_from(source.len()).ok()?;
                     copies.push((part, copy));
                     source.push(v);
                     part_of.push(part);
-                    copy
+                    Some(copy)
                 })
-                .collect();
+                .collect::<Option<_>>()?;
             let split_positions: Vec<[f32; 3]> =
                 source.iter().map(|&v| positions[v as usize]).collect();
             let simplified = simplify_decoder(&split, &split_positions, 0, error, options, None);
@@ -105,24 +106,27 @@ fn facing([first, second, third]: [[f32; 3]; 3]) -> Part {
 }
 
 /// The mesh of the `triangles` and their `parts` between `xyz`, without the vertices none names.
-fn compact(xyz: &[[i32; 3]], mut triangles: Vec<[u32; 3]>, parts: Vec<Part>) -> Mesh {
-    let mut renumbered = vec![u32::MAX; xyz.len()];
+fn compact(xyz: &[[i32; 3]], mut triangles: Vec<[u32; 3]>, parts: Vec<Part>) -> Option<Mesh> {
+    let mut renumbered: Vec<Option<u32>> = vec![None; xyz.len()];
     let mut kept = Vec::new();
     for t in &mut triangles {
         for v in t {
-            let new = &mut renumbered[*v as usize];
-            if *new == u32::MAX {
-                *new = u32::try_from(kept.len()).unwrap_or(u32::MAX);
+            let new = if let Some(new) = renumbered[*v as usize] {
+                new
+            } else {
+                let new = u32::try_from(kept.len()).ok()?;
                 kept.push(xyz[*v as usize]);
-            }
-            *v = *new;
+                renumbered[*v as usize] = Some(new);
+                new
+            };
+            *v = new;
         }
     }
-    Mesh {
+    Some(Mesh {
         xyz: kept,
         triangles,
         parts,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -152,7 +156,7 @@ mod tests {
     #[test]
     fn a_flat_part_keeps_its_outline_and_loses_its_inside() {
         let roof = grid(4, Part::Roof);
-        let simplified = simplify(&roof, [1.0; 3], 0.05, Parts::Seamed);
+        let simplified = simplify(&roof, [1.0; 3], 0.05, Parts::Seamed).unwrap();
         assert!(simplified.triangles.len() < roof.triangles.len());
         assert!(simplified.parts.iter().all(|&p| p == Part::Roof));
         assert!(
@@ -173,7 +177,7 @@ mod tests {
                 *part = Part::Wall;
             }
         }
-        let simplified = simplify(&mesh, [1.0; 3], 0.05, Parts::Seamed);
+        let simplified = simplify(&mesh, [1.0; 3], 0.05, Parts::Seamed).unwrap();
         assert!(simplified.triangles.len() < mesh.triangles.len());
         for part in [Part::Wall, Part::Roof] {
             let doubled_area: i32 = simplified
@@ -202,7 +206,7 @@ mod tests {
             .extend([[5000, 5000, 0], [5001, 5000, 0], [5000, 5001, 0]]);
         mesh.triangles.push([n, n + 2, n + 1]);
         mesh.parts.push(Part::Wall);
-        let simplified = simplify(&mesh, [0.01; 3], 0.05, Parts::Faced);
+        let simplified = simplify(&mesh, [0.01; 3], 0.05, Parts::Faced).unwrap();
         assert_eq!(simplified.triangles.len(), 2);
         assert_eq!(simplified.parts, [Part::Roof, Part::Roof]);
     }

@@ -402,7 +402,11 @@ struct Mesh {
 impl Mesh {
     /// Welds `surfaces`, `points` holding each one's vertices on the grid, so that surfaces share
     /// the vertices they meet at. Vertices keep their order, and those no triangle names are dropped.
-    fn weld<'a>(surfaces: impl IntoIterator<Item = &'a Surface>, points: &[Vec<[i32; 3]>]) -> Self {
+    /// `None` if they are more than a `u32` indexes.
+    fn weld<'a>(
+        surfaces: impl IntoIterator<Item = &'a Surface>,
+        points: &[Vec<[i32; 3]>],
+    ) -> Option<Self> {
         let mut ids: HashMap<[i32; 3], u32> = HashMap::new();
         let mut welded = Vec::new();
         let mut triangles = Vec::new();
@@ -411,12 +415,13 @@ impl Mesh {
             let local: Vec<u32> = points
                 .iter()
                 .map(|&p| {
-                    *ids.entry(p).or_insert_with(|| {
+                    let next = u32::try_from(welded.len()).ok()?;
+                    Some(*ids.entry(p).or_insert_with(|| {
                         welded.push(p);
-                        u32::try_from(welded.len() - 1).unwrap_or(u32::MAX)
-                    })
+                        next
+                    }))
                 })
-                .collect();
+                .collect::<Option<_>>()?;
             for t in &surface.triangles {
                 let [a, b, c] = t.map(|i| local[i as usize]);
                 if a != b && b != c && c != a {
@@ -433,18 +438,18 @@ impl Mesh {
         let mut xyz = Vec::new();
         for (i, p) in welded.into_iter().enumerate() {
             if used[i] {
-                renumbered[i] = u32::try_from(xyz.len()).unwrap_or(u32::MAX);
+                renumbered[i] = u32::try_from(xyz.len()).ok()?;
                 xyz.push(p);
             }
         }
         for t in &mut triangles {
             *t = t.map(|i| renumbered[i as usize]);
         }
-        Self {
+        Some(Self {
             xyz,
             triangles,
             parts,
-        }
+        })
     }
 }
 
@@ -457,7 +462,8 @@ enum Placed {
 /// `building` on the tile of each of `zooms` that holds the centre of its bounding box: at its
 /// highest LOD at the highest zoom, at LOD2 one zoom below and as a block below that, or from
 /// [`MERGE_BELOW`] zooms below as its footprint unless it is a landmark.
-/// A zoom is left out where the building has no triangle or does not fit the tile's grid.
+/// A zoom is left out where the building has no triangle, does not fit the tile's grid, or has
+/// more vertices or triangle corners than a `u32` indexes.
 fn place(
     building: &Building,
     zooms: std::ops::RangeInclusive<u8>,
@@ -481,11 +487,11 @@ fn place(
         };
         let pixel = f64::from(extent) / TILE_PIXELS;
         let mesh = match below {
-            0 => Some(Mesh::weld(view.surfaces.iter().copied(), &points)),
+            0 => Mesh::weld(view.surfaces.iter().copied(), &points),
             1 => {
                 let z = tile.width() / TILE_PIXELS / z_step.metres();
                 let cell = [pixel, pixel, z].map(|c| c * LOD2_CELL_PIXELS);
-                Some(cluster(&view.surfaces, &points, cell))
+                cluster(&view.surfaces, &points, cell)
             }
             _ if below < MERGE_BELOW => block(&view.surfaces, &points, pixel, BLOCK_MIN_PIXELS),
             _ => {
@@ -505,7 +511,7 @@ fn place(
             1 => (ERROR_PIXELS * tile.width() / TILE_PIXELS, Parts::Seamed),
             _ => (ERROR_PIXELS * tile.width() / TILE_PIXELS, Parts::Faced),
         };
-        let mesh = mesh.map(|m| simplify(&m, [metres, metres, z_step.metres()], error, parts));
+        let mesh = mesh.and_then(|m| simplify(&m, [metres, metres, z_step.metres()], error, parts));
         if let Some(mesh) = mesh.filter(|m| !m.triangles.is_empty()) {
             placed.push((tile, Placed::Mesh(mesh)));
         }
@@ -569,8 +575,9 @@ impl<'a> View<'a> {
 }
 
 /// `surfaces` with each of their `points` moved to the nearest multiple of `cell` in x, y and z,
-/// welded, keeping one of the triangles that wind alike through the same vertices.
-fn cluster(surfaces: &[&Surface], points: &[Vec<[i32; 3]>], cell: [f64; 3]) -> Mesh {
+/// welded, keeping one of the triangles that wind alike through the same vertices. `None` as
+/// [`Mesh::weld`] says.
+fn cluster(surfaces: &[&Surface], points: &[Vec<[i32; 3]>], cell: [f64; 3]) -> Option<Mesh> {
     let snapped: Vec<Vec<[i32; 3]>> = points
         .iter()
         .map(|p| {
@@ -579,7 +586,7 @@ fn cluster(surfaces: &[&Surface], points: &[Vec<[i32; 3]>], cell: [f64; 3]) -> M
                 .collect()
         })
         .collect();
-    let mut mesh = Mesh::weld(surfaces.iter().copied(), &snapped);
+    let mut mesh = Mesh::weld(surfaces.iter().copied(), &snapped)?;
     let mut seen = HashSet::new();
     (mesh.triangles, mesh.parts) = mesh
         .triangles
@@ -596,13 +603,14 @@ fn cluster(surfaces: &[&Surface], points: &[Vec<[i32; 3]>], cell: [f64; 3]) -> M
         })
         .map(|(&t, &p)| (t, p))
         .unzip();
-    mesh
+    Some(mesh)
 }
 
 /// The block of `surfaces` at `points` on a grid of `pixel` units per pixel: the outline of
 /// their ground or, without one, their bounding box, its corners clustered, raised from 0 to
 /// their top. Its walls and roof face out, and it has no bottom.
-/// `None` if the longer side of their bounding box is under `min_pixels`.
+/// `None` if the longer side of their bounding box is under `min_pixels`, or if its vertices are
+/// more than a `u32` indexes.
 fn block(
     surfaces: &[&Surface],
     points: &[Vec<[i32; 3]>],
@@ -633,7 +641,7 @@ fn block(
             (s, flat.collect())
         })
         .unzip();
-    let ground = Mesh::weld(grounds, &flat);
+    let ground = Mesh::weld(grounds, &flat)?;
     let mut xyz = ground.xyz;
     let mut triangles = facing_down(&xyz, &ground.triangles);
     if triangles.is_empty() {
@@ -650,7 +658,10 @@ fn block(
     for [a, b] in triangles.iter().flat_map(edges) {
         *uses.entry([a.min(b), a.max(b)]).or_default() += 1;
     }
-    let n = u32::try_from(xyz.len()).ok()?;
+    // The roof's vertices follow the ground's, so twice their count must fit.
+    let n = u32::try_from(xyz.len())
+        .ok()
+        .filter(|&n| n <= u32::MAX / 2)?;
     let surface = |part, triangles| Surface {
         part,
         lods: Lods::Both,
@@ -666,13 +677,13 @@ fn block(
     let roof = triangles.iter().map(|&[a, b, c]| [a + n, c + n, b + n]);
     let mut raised = xyz.clone();
     raised.extend(xyz.iter().map(|&[x, y, _]| [x, y, max[2]]));
-    Some(Mesh::weld(
+    Mesh::weld(
         &[
             surface(Part::Wall, walls),
             surface(Part::Roof, roof.collect()),
         ],
         &[raised.clone(), raised],
-    ))
+    )
 }
 
 /// The `triangles` between flat `xyz` that have an area, each turned to face down.
@@ -733,7 +744,8 @@ fn layer(
             .iter()
             .map(|&m| ids[m])
             .find(|&id| taken.insert(id));
-        let count = u32::try_from(block.members.len()).unwrap_or(u32::MAX);
+        let count = u32::try_from(block.members.len())
+            .context("a block holds more buildings than a u32 counts")?;
         meshes.push((id, None, Some(count), block.mesh));
     }
 
@@ -797,7 +809,7 @@ mod tests {
             vec![[0, 0, 0], [5, 0, 0], [0, 5, 0]],
             vec![[5, 0, 0], [5, 5, 0], [0, 5, 0], [9, 9, 9]],
         ];
-        let mesh = Mesh::weld(&surfaces, &points);
+        let mesh = Mesh::weld(&surfaces, &points).unwrap();
         assert_eq!(mesh.xyz, [[0, 0, 0], [5, 0, 0], [0, 5, 0], [5, 5, 0]]);
         assert_eq!(mesh.triangles, [[0, 1, 2], [1, 2, 3]]);
         assert_eq!(mesh.parts, [Part::Wall, Part::Roof]);
@@ -807,7 +819,7 @@ mod tests {
     fn clustering_collapses_edges_under_a_cell_and_keeps_one_of_triangles_winding_alike() {
         let wall = surface(Part::Wall, vec![[0, 1, 2], [1, 3, 2], [1, 2, 0], [2, 1, 0]]);
         let points = [vec![[0, 0, 0], [100, 0, 0], [0, 0, 100], [104, 0, 3]]];
-        let mesh = cluster(&[&wall], &points, [10.0, 10.0, 10.0]);
+        let mesh = cluster(&[&wall], &points, [10.0, 10.0, 10.0]).unwrap();
         assert_eq!(mesh.xyz, [[0, 0, 0], [100, 0, 0], [0, 0, 100]]);
         assert_eq!(mesh.triangles, [[0, 1, 2], [2, 1, 0]]);
     }
