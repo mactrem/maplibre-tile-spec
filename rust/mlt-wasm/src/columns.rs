@@ -169,19 +169,8 @@ fn m_value_column(column: &ParsedMValue<'_>, feature_count: usize) -> Object {
         MValues::F32(v) => set(&object, "values", &f32::js_array(v)),
         MValues::F64(v) => set(&object, "values", &f64::js_array(v)),
         MValues::Str(strings) => {
-            // A renderer evaluates a style once per distinct value, so strings come as codes.
-            let mut entries: HashMap<&str, u32> = HashMap::new();
-            let dictionary = Array::new();
-            let codes: Vec<u32> = (0..strings.feature_count())
-                .map(|i| {
-                    let value = string_at(strings, i).unwrap_or("");
-                    *entries.entry(value).or_insert_with(|| {
-                        dictionary.push(&JsValue::from_str(value));
-                        dictionary.length() - 1
-                    })
-                })
-                .collect();
-            set(&object, "codes", &Uint32Array::from(&codes[..]));
+            let (codes, dictionary) = string_codes(strings);
+            set(&object, "codes", &codes);
             set(&object, "dictionary", &dictionary);
         }
     }
@@ -189,6 +178,33 @@ fn m_value_column(column: &ParsedMValue<'_>, feature_count: usize) -> Object {
         set(&object, "present", &present);
     }
     object
+}
+
+/// A string column as codes into its distinct values, `""` standing in for a null: a renderer
+/// evaluates a style once per distinct value. A dictionary-coded column without nulls passes
+/// its codes on as decoded.
+#[cfg(feature = "unstable-v2")]
+fn string_codes(strings: &ParsedStrings<'_>) -> (Uint32Array, Array) {
+    if let Some((entries, codes)) = strings.dictionary()
+        && !codes.contains(&ParsedStrings::NULL_CODE)
+    {
+        return (
+            Uint32Array::from(codes),
+            entries.map(JsValue::from_str).collect(),
+        );
+    }
+    let mut entries: HashMap<&str, u32> = HashMap::new();
+    let dictionary = Array::new();
+    let codes: Vec<u32> = (0..strings.feature_count())
+        .map(|i| {
+            let value = string_at(strings, i).unwrap_or("");
+            *entries.entry(value).or_insert_with(|| {
+                dictionary.push(&JsValue::from_str(value));
+                dictionary.length() - 1
+            })
+        })
+        .collect();
+    (Uint32Array::from(&codes[..]), dictionary)
 }
 
 /// A column's type, its values, and its presence when some feature has no value.
