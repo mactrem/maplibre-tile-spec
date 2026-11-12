@@ -494,7 +494,10 @@ function splitByTriangle(indexBuffer, n, keyOf) {
   return { index, source: source.subarray(0, count), keys: keys.subarray(0, count) };
 }
 
-/** A layer's vertices in metres east, up and south of its tile's corner, `width` metres wide, their colours and features, and its triangles. */
+/**
+ * A layer's vertices in metres east, up and south of its tile's corner, `width` metres wide, their
+ * colours as opaque RGBA bytes and their features, and its triangles.
+ */
 function layerArrays(layer, width) {
   const g = layer.geometry;
   const n = g.vertices.length / 3;
@@ -507,7 +510,7 @@ function layerArrays(layer, width) {
   for (let f = 0; f < layer.featureCount; f++) featureOfVertex.fill(f, g.geometryOffsets[f], g.geometryOffsets[f + 1]);
   const count = source ? source.length : n;
   const position = new Float32Array(count * 3);
-  const color = new Float32Array(count * 3);
+  const color = new Uint8Array(count * 4).fill(255);
   const featureOf = new Uint32Array(count);
   const c = new THREE.Color();
   for (let o = 0; o < count; o++) {
@@ -518,22 +521,28 @@ function layerArrays(layer, width) {
     position[o * 3 + 2] = (g.vertices[v * 3 + 1] / layer.extent) * width;
     if (colors) colors.paint(keys ? keys[o] : colors.key(v), c);
     else c.setHex(0xcccccc);
-    color.set([c.r, c.g, c.b], o * 3);
+    color[o * 4] = Math.round(c.r * 255);
+    color[o * 4 + 1] = Math.round(c.g * 255);
+    color[o * 4 + 2] = Math.round(c.b * 255);
   }
   return { position, color, featureOf, index };
 }
 
-/** A tile's layers as one THREE mesh at its corner, so one draw call; `firstIndex` is where each layer's triangles start. */
+/**
+ * A tile's layers as one THREE mesh at its corner, so one draw call; `firstIndex` is where each layer's
+ * triangles start. Colours are 4 bytes and, under 65536 vertices, indices 2, as fewer bytes upload faster.
+ */
 function buildMesh(entry) {
   const parts = entry.layers.map((layer) => layerArrays(layer, tileWidth(entry.z)));
   const vertices = parts.reduce((sum, p) => sum + p.featureOf.length, 0);
-  const position = new Float32Array(vertices * 3), color = new Float32Array(vertices * 3);
-  const featureOf = new Uint32Array(vertices), index = new Uint32Array(entry.triangles * 3);
+  const position = new Float32Array(vertices * 3), color = new Uint8Array(vertices * 4);
+  const featureOf = new Uint32Array(vertices);
+  const index = new (vertices <= 65536 ? Uint16Array : Uint32Array)(entry.triangles * 3);
   const firstIndex = [];
   let v = 0, i = 0;
   for (const p of parts) {
     position.set(p.position, v * 3);
-    color.set(p.color, v * 3);
+    color.set(p.color, v * 4);
     featureOf.set(p.featureOf, v);
     firstIndex.push(i);
     for (const o of p.index) index[i++] = v + o;
@@ -541,7 +550,7 @@ function buildMesh(entry) {
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
-  geometry.setAttribute("color", new THREE.BufferAttribute(color, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(color, 4, true));
   geometry.setIndex(new THREE.BufferAttribute(index, 1));
   geometry.computeBoundingSphere();
   const mesh = new THREE.Mesh(geometry, materials[lodOf(entry.z)]);

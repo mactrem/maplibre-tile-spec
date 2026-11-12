@@ -221,7 +221,8 @@ two zooms lower near the camera. It tints each
 tile by the level of detail `mlt convert` writes at its zoom, and fades the far tiles into a fog
 that a slider thickens, which also draws fewer tiles, as none is drawn past where it turns opaque.
 Build it with
-`npm run build:web`, which writes `pkg-web/`, serve this directory and open
+`npm run build:web`, which writes `pkg-web/` optimized for size rather than speed, serve this
+directory and open
 `viewer/meshes.html?tiles=<base>` or `viewer/meshes.html?url=<archive>`, adding
 `&attribution=<text>` to credit the data and `&quality=high`, `phone` or `low` to pick the
 detail. `just rust::mesh-site`
