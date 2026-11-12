@@ -37,6 +37,7 @@
   #legend span, #lodLegend span { display: inline-block; width: 10px; height: 10px; margin: 0 4px 0 8px; }
   #stats { position: absolute; left: 8px; bottom: 8px; padding: 2px 6px; background: #000a; border-radius: 4px; white-space: pre; font: 11px ui-monospace, monospace; pointer-events: none; }
   #attribution { position: absolute; left: 8px; bottom: 44px; max-width: min(480px, calc(100vw - 28px)); padding: 2px 6px; background: #000a; border-radius: 4px; font-size: 11px; }
+  label:has(:disabled) { opacity: 0.5; }
   #attribution:empty { display: none; }
   #attribution a { color: #9cf; }
   #drop { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; font-size: 24px; background: #0008; pointer-events: none; }
@@ -55,7 +56,7 @@
 <details id="panel" open>
   <summary>MLT meshes</summary>
   <input type="file" id="file" accept=".pmtiles">
-  <label><input type="checkbox" id="byPart" checked> Colour by part, not by the color m-value</label>
+  <label title="No tile so far carries a color m-value"><input type="checkbox" id="byPart" checked disabled> Colour by part, not by the color m-value</label>
   <div id="legend"></div>
   <label><input type="checkbox" id="byLod" checked> Tint by level of detail</label>
   <div id="lodLegend"></div>
@@ -247,6 +248,14 @@ async function open(opened) {
   }
 }
 
+/** Lets the part checkbox be cleared once a tile carries a color m-value to colour by instead. */
+function enableByPart(enabled) {
+  const box = $("byPart");
+  box.disabled = !enabled;
+  box.parentElement.title = enabled ? "" : "No tile so far carries a color m-value";
+  if (!enabled) box.checked = true;
+}
+
 /** Drops the tiles shown and shows `source`'s, the world's origin and the camera's target at their centre. */
 function show(source) {
   for (const controller of loading.values()) controller.abort();
@@ -256,6 +265,7 @@ function show(source) {
   loadedPerZoom.clear();
   world.clear();
   unpick();
+  enableByPart(false);
   tiles = source;
   const [u, v] = source.centre;
   origin = { u, v, scale: EARTH * Math.cos(Math.atan(Math.sinh(Math.PI * (1 - 2 * v)))) };
@@ -442,6 +452,7 @@ async function load(t) {
 function decode({ z, x, y, key }, data) {
   const layers = decodeTileColumns(data).filter((l) => l.geometry.types.length > 0 && l.geometry.types.every((g) => g === MESH));
   const entry = { z, x, y, key, layers, triangles: layers.reduce((sum, l) => sum + l.geometry.indexBuffer.length / 3, 0) };
+  if (layers.some((l) => l.mValues?.some((c) => c.name === "color"))) enableByPart(true);
   if (layers.length > 0) entry.mesh = buildMesh(entry);
   return entry;
 }
