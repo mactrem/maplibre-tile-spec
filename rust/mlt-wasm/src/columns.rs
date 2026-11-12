@@ -181,17 +181,29 @@ fn m_value_column(column: &ParsedMValue<'_>, feature_count: usize) -> Object {
 }
 
 /// A string column as codes into its distinct values, `""` standing in for a null: a renderer
-/// evaluates a style once per distinct value. A dictionary-coded column without nulls passes
-/// its codes on as decoded.
+/// evaluates a style once per distinct value. A dictionary-coded column passes its codes on as
+/// decoded, its nulls then coded as its `""` entry, added if it has none.
 #[cfg(feature = "unstable-v2")]
 fn string_codes(strings: &ParsedStrings<'_>) -> (Uint32Array, Array) {
-    if let Some((entries, codes)) = strings.dictionary()
-        && !codes.contains(&ParsedStrings::NULL_CODE)
-    {
-        return (
-            Uint32Array::from(codes),
-            entries.map(JsValue::from_str).collect(),
-        );
+    if let Some((entries, codes)) = strings.dictionary() {
+        let dictionary: Array = entries.map(JsValue::from_str).collect();
+        if !codes.contains(&ParsedStrings::NULL_CODE) {
+            return (Uint32Array::from(codes), dictionary);
+        }
+        let empty = JsValue::from_str("");
+        let null = u32::try_from(dictionary.index_of(&empty, 0))
+            .unwrap_or_else(|_| dictionary.push(&empty) - 1);
+        let codes: Vec<u32> = codes
+            .iter()
+            .map(|&code| {
+                if code == ParsedStrings::NULL_CODE {
+                    null
+                } else {
+                    code
+                }
+            })
+            .collect();
+        return (Uint32Array::from(&codes[..]), dictionary);
     }
     let mut entries: HashMap<&str, u32> = HashMap::new();
     let dictionary = Array::new();
