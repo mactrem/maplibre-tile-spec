@@ -45,13 +45,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE: hamburg-lod-data
-          ARCHIVE: hamburg_v3_lod.pmtiles
-          SHA256: 859324938bccb9c923cdb59056c267e6b00f96565b27cd0a1f05f7d3f90365e8
+          ARCHIVE: hamburg_v3_lod_v4.pmtiles
+          SHA256: af7ba81cafdb65f30baffb65f5b58268ff1b722632e9e9bb97fe15878ec4555b
           ATTRIBUTION: >-
             Buildings: Freie und Hansestadt Hamburg, Landesbetrieb Geoinformation und Vermessung (LGV),
             3D-Gebäudemodell LoD3.0-HH https://suche.transparenz.hamburg.de/dataset/3d-gebaeudemodell-lod3-0-hh-hamburg17
             · dl-de/by-2-0 https://www.govdata.de/dl-de/by-2-0
-            · changed: tiled by mlt convert, and simplified below the highest zoom
+            · changed: tiled by mlt convert, and simplified
         run: |
           if ! gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" > /dev/null; then
             echo "No release $RELEASE, so the site shows the extract"
