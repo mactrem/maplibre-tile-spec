@@ -21,6 +21,9 @@
 //! above its neighbour or the ground. Higher buildings stay blocks of their own there, whatever
 //! their size.
 //!
+//! Every mesh but the merged blocks is then simplified by meshoptimizer: within 5 cm at the highest
+//! zoom and a third of a pixel below, its pieces smaller than that removed.
+//!
 //! A file whose coordinates lie far from the input's other files in the CRS it declares, but near
 //! them in the CRS most files declare, is read in the latter: some Hamburg files declare
 //! EPSG:25833 for UTM zone 32 coordinates.
@@ -28,6 +31,7 @@
 mod crs;
 mod merge;
 mod parser;
+mod simplify;
 mod triangulate;
 
 use std::cmp::Reverse;
@@ -46,6 +50,7 @@ use walkdir::WalkDir;
 use self::crs::{Reprojector, epsg_of_srs_name};
 use self::merge::{Footprint, merge};
 use self::parser::{Lods, Part};
+use self::simplify::{Parts, simplify};
 use super::from_geojson::{mercator_unit, tile_index};
 use super::{ConvertArgs, Reencoder};
 
@@ -75,6 +80,10 @@ const MERGE_BELOW: u8 = 3;
 const LANDMARK_MIN_METRES: f64 = 40.0;
 /// The height, in pixels, under which merged blocks have no wall between them or to the ground.
 const WALL_MIN_PIXELS: f64 = 1.0;
+/// The error, in metres, the meshes of the highest zoom are simplified within: close to lossless.
+const HIGHEST_ERROR_METRES: f64 = 0.05;
+/// The error, in pixels, the meshes and blocks of lower zooms are simplified within.
+const ERROR_PIXELS: f64 = 1.0 / 3.0;
 
 /// Whether `path` is a `CityGML` file, or a directory whose first `.gml` file comes before any tile.
 pub(super) fn is_citygml(path: &Path) -> bool {
@@ -490,6 +499,13 @@ fn place(
                 block(&view.surfaces, &points, pixel, 0.0)
             }
         };
+        let metres = tile.width() / f64::from(extent);
+        let (error, parts) = match below {
+            0 => (HIGHEST_ERROR_METRES, Parts::Seamed),
+            1 => (ERROR_PIXELS * tile.width() / TILE_PIXELS, Parts::Seamed),
+            _ => (ERROR_PIXELS * tile.width() / TILE_PIXELS, Parts::Faced),
+        };
+        let mesh = mesh.map(|m| simplify(&m, [metres, metres, z_step.metres()], error, parts));
         if let Some(mesh) = mesh.filter(|m| !m.triangles.is_empty()) {
             placed.push((tile, Placed::Mesh(mesh)));
         }
