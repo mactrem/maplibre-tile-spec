@@ -73,8 +73,11 @@ import init, { decodeTileColumns } from "mlt-wasm";
 
 const MESH = 6;
 const PARTS = { wall: 0xe3ded4, roof: 0xa36654, ground: 0x8c8a85, window: 0x7391a8, door: 0x856145 };
-/** The levels of detail `mlt convert` writes at the highest zoom, the one below, and all lower ones, and their tints. */
-const LODS = [{ name: "LOD3", tint: 0xffa070 }, { name: "LOD2", tint: 0x90d890 }, { name: "block", tint: 0x80a8ff }];
+/** The levels of detail `mlt convert` writes at the highest zoom, the two below, and all lower ones, and their tints. */
+const LODS = [
+  { name: "LOD3", tint: 0xffa070 }, { name: "LOD2", tint: 0x90d890 },
+  { name: "block", tint: 0x80a8ff }, { name: "merged", tint: 0xc890ff },
+];
 const EARTH = 2 * Math.PI * 6378137;
 const CHILDREN = [[0, 0], [1, 0], [0, 1], [1, 1]];
 /** Metres: the highest a building reaches, and how far it reaches beyond the tile holding its centre. */

@@ -13,13 +13,20 @@
 //! installations and holes, its vertices clustered in cells of half a pixel. Lower zooms hold a
 //! block: the outline of its ground, or its bounding box without one, clustered in cells of a
 //! pixel and raised from 0 to its top as walls and a roof. A building under 2 pixels across has
-//! no block. A pixel is a 512th of a tile.
+//! no block. A pixel is a 512th of a tile. From three zooms below the highest, the buildings of a
+//! tile lower than 40 m are merged where they touch: the cells of a pixel their grounds cover at
+//! least half of are joined with their neighbours in the same 10 m band of tops, and each group is
+//! one block at its mean top, with a `buildings` property counting the buildings it holds. Its
+//! outline is simplified to within a pixel, and it has no wall where it stands less than a pixel
+//! above its neighbour or the ground. Higher buildings stay blocks of their own there, whatever
+//! their size.
 //!
 //! A file whose coordinates lie far from the input's other files in the CRS it declares, but near
 //! them in the CRS most files declare, is read in the latter: some Hamburg files declare
 //! EPSG:25833 for UTM zone 32 coordinates.
 
 mod crs;
+mod merge;
 mod parser;
 mod triangulate;
 
@@ -37,6 +44,7 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use self::crs::{Reprojector, epsg_of_srs_name};
+use self::merge::{Footprint, merge};
 use self::parser::{Lods, Part};
 use super::from_geojson::{mercator_unit, tile_index};
 use super::{ConvertArgs, Reencoder};
@@ -61,6 +69,12 @@ const LOD2_CELL_PIXELS: f64 = 0.5;
 const BLOCK_CELL_PIXELS: f64 = 1.0;
 /// The longer side of its bounding box, in pixels, under which a building has no block.
 const BLOCK_MIN_PIXELS: f64 = 2.0;
+/// How many zooms below the highest the blocks of a tile's buildings start to be merged.
+const MERGE_BELOW: u8 = 3;
+/// The top, in metres above its ground, from which a building is never merged.
+const LANDMARK_MIN_METRES: f64 = 40.0;
+/// The height, in pixels, under which merged blocks have no wall between them or to the ground.
+const WALL_MIN_PIXELS: f64 = 1.0;
 
 /// Whether `path` is a `CityGML` file, or a directory whose first `.gml` file comes before any tile.
 pub(super) fn is_citygml(path: &Path) -> bool {
@@ -140,18 +154,18 @@ pub(super) fn convert(args: &ConvertArgs, reencoder: &Reencoder) -> AnyResult<()
         .flat_map(|f| f.buildings)
         .collect();
 
-    let mut tiles: BTreeMap<Tile, Vec<(u64, &Building, Mesh)>> = BTreeMap::new();
+    let mut tiles: BTreeMap<Tile, Vec<(u64, &Building, Placed)>> = BTreeMap::new();
     for (id, building) in (0..).zip(&buildings) {
-        for (tile, mesh) in place(building, min_zoom..=max_zoom, z_step) {
-            tiles.entry(tile).or_default().push((id, building, mesh));
+        for (tile, placed) in place(building, min_zoom..=max_zoom, z_step) {
+            tiles.entry(tile).or_default().push((id, building, placed));
         }
     }
     let written = tiles.len();
     tiles
         .into_par_iter()
-        .try_for_each(|(tile, meshes)| -> AnyResult<()> {
+        .try_for_each(|(tile, placed)| -> AnyResult<()> {
             let at = format!("{}/{}/{}", tile.zoom, tile.x, tile.y);
-            let layer = layer(&name, tile, z_step, meshes)?;
+            let layer = layer(&name, tile, z_step, placed)?;
             let bytes = reencoder
                 .encode(layer)
                 .with_context(|| format!("encoding tile {at}"))?;
@@ -425,14 +439,21 @@ impl Mesh {
     }
 }
 
+/// A building on a tile: its mesh, or its footprint, to be merged with those of the tile's others.
+enum Placed {
+    Mesh(Mesh),
+    Footprint(Footprint),
+}
+
 /// `building` on the tile of each of `zooms` that holds the centre of its bounding box: at its
-/// highest LOD at the highest zoom, at LOD2 one zoom below and as a block below that.
+/// highest LOD at the highest zoom, at LOD2 one zoom below and as a block below that, or from
+/// [`MERGE_BELOW`] zooms below as its footprint unless it is a landmark.
 /// A zoom is left out where the building has no triangle or does not fit the tile's grid.
 fn place(
     building: &Building,
     zooms: std::ops::RangeInclusive<u8>,
     z_step: ZStep,
-) -> Vec<(Tile, Mesh)> {
+) -> Vec<(Tile, Placed)> {
     let max_zoom = *zooms.end();
     let highest = View::new(building.surfaces.iter().filter(|s| s.lods != Lods::Lod2));
     let lod2 = (zooms.start() < zooms.end())
@@ -457,10 +478,20 @@ fn place(
                 let cell = [pixel, pixel, z].map(|c| c * LOD2_CELL_PIXELS);
                 Some(cluster(&view.surfaces, &points, cell))
             }
-            _ => block(&view.surfaces, &points, pixel),
+            _ if below < MERGE_BELOW => block(&view.surfaces, &points, pixel, BLOCK_MIN_PIXELS),
+            _ => {
+                let Some(footprint) = Footprint::new(&view.surfaces, &points) else {
+                    continue;
+                };
+                if f64::from(footprint.top()) * z_step.metres() < LANDMARK_MIN_METRES {
+                    placed.push((tile, Placed::Footprint(footprint)));
+                    continue;
+                }
+                block(&view.surfaces, &points, pixel, 0.0)
+            }
         };
         if let Some(mesh) = mesh.filter(|m| !m.triangles.is_empty()) {
-            placed.push((tile, mesh));
+            placed.push((tile, Placed::Mesh(mesh)));
         }
     }
     placed
@@ -555,8 +586,13 @@ fn cluster(surfaces: &[&Surface], points: &[Vec<[i32; 3]>], cell: [f64; 3]) -> M
 /// The block of `surfaces` at `points` on a grid of `pixel` units per pixel: the outline of
 /// their ground or, without one, their bounding box, its corners clustered, raised from 0 to
 /// their top. Its walls and roof face out, and it has no bottom.
-/// `None` if the longer side of their bounding box is under [`BLOCK_MIN_PIXELS`].
-fn block(surfaces: &[&Surface], points: &[Vec<[i32; 3]>], pixel: f64) -> Option<Mesh> {
+/// `None` if the longer side of their bounding box is under `min_pixels`.
+fn block(
+    surfaces: &[&Surface],
+    points: &[Vec<[i32; 3]>],
+    pixel: f64,
+    min_pixels: f64,
+) -> Option<Mesh> {
     let (min, max) =
         points
             .iter()
@@ -568,7 +604,7 @@ fn block(surfaces: &[&Surface], points: &[Vec<[i32; 3]>], pixel: f64) -> Option<
                 )
             });
     let side = |i: usize| f64::from(max[i]) - f64::from(min[i]);
-    if side(0).max(side(1)) < BLOCK_MIN_PIXELS * pixel {
+    if side(0).max(side(1)) < min_pixels * pixel {
         return None;
     }
     let cell = BLOCK_CELL_PIXELS * pixel;
@@ -648,27 +684,62 @@ fn snap(v: i32, cell: f64) -> i32 {
     ((f64::from(v) / cell).round_ties_even() * cell).round() as i32
 }
 
-/// The layer of a tile's meshes, each with its feature id and building.
+/// The layer of a tile's buildings, each with its feature id, the footprints merged into blocks.
+/// A block takes the id of the first building it holds that no other feature has, and counts
+/// them in a `buildings` property.
 fn layer(
     name: &str,
     tile: Tile,
     z_step: ZStep,
-    meshes: Vec<(u64, &Building, Mesh)>,
+    placed: Vec<(u64, &Building, Placed)>,
 ) -> AnyResult<TileLayer> {
+    let mut meshes = Vec::new();
+    let (mut ids, mut footprints) = (Vec::new(), Vec::new());
+    for (id, building, placed) in placed {
+        match placed {
+            Placed::Mesh(mesh) => meshes.push((Some(id), building.gml_id.as_deref(), None, mesh)),
+            Placed::Footprint(footprint) => {
+                ids.push(id);
+                footprints.push(footprint);
+            }
+        }
+    }
+    let cell = BLOCK_CELL_PIXELS * f64::from(tile.extent()) / TILE_PIXELS;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a pixel of a tile of at most a few hundred km in z units of at least a millimetre"
+    )]
+    let min_wall = (WALL_MIN_PIXELS * tile.width() / TILE_PIXELS / z_step.metres()).round() as i32;
+    let mut taken: HashSet<u64> = meshes.iter().filter_map(|m| m.0).collect();
+    for block in merge(&footprints, cell, z_step, min_wall) {
+        let id = block
+            .members
+            .iter()
+            .map(|&m| ids[m])
+            .find(|&id| taken.insert(id));
+        let count = u32::try_from(block.members.len()).unwrap_or(u32::MAX);
+        meshes.push((id, None, Some(count), block.mesh));
+    }
+
     let mut builder = TileLayer::builder(name, tile.extent())?;
     builder.set_z_step(z_step)?;
     let gml_id = builder.add_property("gml_id", PropKind::Str)?;
+    let buildings = meshes
+        .iter()
+        .any(|m| m.2.is_some())
+        .then(|| builder.add_property("buildings", PropKind::U32))
+        .transpose()?;
     let part = builder.add_scoped_m_value("part", PropKind::Str, MValueScope::Triangle)?;
-    for (id, building, mesh) in meshes {
+    for (id, name, count, mesh) in meshes.into_iter().filter(|m| !m.3.triangles.is_empty()) {
         let points = mesh.xyz.iter().map(|&[x, y, _]| Point::new(x, y)).collect();
         let mut feature = builder.feature(Geometry::MultiPoint(MultiPoint(points)));
-        feature.id(Some(id));
+        feature.id(id);
         feature.z(mesh.xyz.iter().map(|v| v[2]).collect())?;
         feature.triangles(mesh.triangles)?;
-        feature.property(
-            gml_id,
-            PropValue::Str(building.gml_id.as_deref().map(Into::into)),
-        )?;
+        feature.property(gml_id, PropValue::Str(name.map(Into::into)))?;
+        if let Some(buildings) = buildings {
+            feature.property(buildings, PropValue::U32(count))?;
+        }
         let parts = mesh.parts.iter().map(|p| p.as_str().into()).collect();
         feature.m_value(part, MValue::Str(Some(parts)))?;
         feature.finish()?;
@@ -743,7 +814,7 @@ mod tests {
             ],
             vec![[0, 0, 7], [100, 0, 7], [0, 100, 7]],
         ];
-        let mesh = block(&[&ground, &roof], &points, 1.0).unwrap();
+        let mesh = block(&[&ground, &roof], &points, 1.0, BLOCK_MIN_PIXELS).unwrap();
         assert_eq!(mesh.xyz.len(), 9);
         assert_eq!([count(&mesh, Part::Wall), count(&mesh, Part::Roof)], [8, 4]);
 
@@ -788,7 +859,7 @@ mod tests {
             vec![[0, 0, 5], [30, 0, 5], [0, 20, 9]],
             vec![[0, 0, 5], [30, 0, 5], [15, 0, 5]],
         ];
-        let mesh = block(&[&roof, &line], &points, 10.0).unwrap();
+        let mesh = block(&[&roof, &line], &points, 10.0, BLOCK_MIN_PIXELS).unwrap();
         let mut xyz = mesh.xyz.clone();
         xyz.sort_unstable();
         assert_eq!(
@@ -805,7 +876,7 @@ mod tests {
             ]
         );
         assert_eq!([count(&mesh, Part::Wall), count(&mesh, Part::Roof)], [8, 2]);
-        assert!(block(&[&roof, &line], &points, 16.0).is_none());
+        assert!(block(&[&roof, &line], &points, 16.0, BLOCK_MIN_PIXELS).is_none());
     }
 
     #[test]

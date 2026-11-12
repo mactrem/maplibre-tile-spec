@@ -85,9 +85,15 @@ Lower zooms hold less detail, a pixel being a 512th of a tile:
 - The zoom below holds LOD2: a part's own LOD2 or LOD1 if the file has one, or else its highest
   LOD without windows, doors, installations and the holes they leave, its vertices clustered in
   cells of half a pixel.
-- Lower zooms hold a block: the outline of the building's ground, or its bounding box without
-  one, clustered in cells of a pixel and raised to its top. A building under 2 pixels across is
-  left out.
+- The zoom two below holds a block: the outline of the building's ground, or its bounding box
+  without one, clustered in cells of a pixel and raised to its top. A building under 2 pixels
+  across is left out.
+- Lower zooms merge the blocks of a tile's buildings under 40 m where they touch: the cells of a
+  pixel that their grounds cover at least half of are joined with their neighbours in the same
+  10 m band of tops, and each group becomes one block at its mean top. Its outline is simplified
+  to within a pixel, and it has no wall where it stands less than a pixel above its neighbour or
+  the ground. Such a block has no `gml_id`, but a `buildings` property counting the buildings it
+  holds. A building of 40 m or more stays a block of its own, whatever its size.
 
 A file whose coordinates lie more than 1° from the input's other files in the CRS it declares,
 but near them in the CRS most files declare, is read in the latter with a warning: some Hamburg

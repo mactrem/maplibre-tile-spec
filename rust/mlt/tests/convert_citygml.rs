@@ -85,7 +85,7 @@ fn each_building_becomes_one_mesh_per_zoom_with_parts_and_heights_above_ground()
 }
 
 #[test]
-fn zooms_two_below_the_highest_hold_blocks_of_buildings_at_least_two_pixels_across() {
+fn lower_zooms_hold_blocks_merged_from_three_below_the_highest_but_for_landmarks() {
     let dir = TempDir::new();
     let output = dir.0.join("out");
     let zooms = ["--mlt-version", "2", "--min-zoom", "13", "--max-zoom", "16"];
@@ -96,11 +96,21 @@ fn zooms_two_below_the_highest_hold_blocks_of_buildings_at_least_two_pixels_acro
     };
     assert_box(tower, "tower", 6000..=6000, [8, 2, 0]);
     assert_box(kiosk, "kiosk", 300..=300, [8, 2, 0]);
-    // A pixel at zoom 13 is about 5.7 m, so the 8 m kiosk is left out.
-    let [tower] = &features(&output, "13/4323/2647")[..] else {
-        panic!("1 feature at zoom 13");
+    // Zoom 13 is three below the highest: the 60 m tower stays a block of its own, and the 3 m
+    // kiosk is merged, alone, into the cells of about 5.7 m its ground covers half of: a roof
+    // without walls, lower than a pixel.
+    let [tower, kiosk] = &features(&output, "13/4323/2647")[..] else {
+        panic!("2 features at zoom 13");
     };
     assert_box(tower, "tower", 6000..=6000, [8, 2, 0]);
+    assert_eq!(
+        kiosk.properties(),
+        [PropValue::Str(None), PropValue::U32(Some(1))]
+    );
+    let mut heights = kiosk.z().to_vec();
+    heights.sort_unstable();
+    heights.dedup();
+    assert_eq!(heights, [300]);
 }
 
 /// The features of the `buildings` layer of the tile `z/x/y` under `output`, by id.
@@ -112,7 +122,11 @@ fn features(output: &Path, tile: &str) -> Vec<TileFeature> {
     let layer = layer.into_tile(&mut Decoder::default()).unwrap().unwrap();
     assert_eq!(layer.name(), "buildings");
     assert_eq!(layer.z_step(), Some(ZStep::above_ground(-2).unwrap()));
-    assert_eq!(layer.property_names(), ["gml_id"]);
+    let names = layer.property_names();
+    assert!(
+        names == ["gml_id"] || names == ["gml_id", "buildings"],
+        "{names:?}"
+    );
     assert_eq!(layer.m_value_names(), ["part"]);
     let mut features = layer.features().to_vec();
     features.sort_by_key(TileFeature::id);
@@ -123,7 +137,11 @@ fn features(output: &Path, tile: &str) -> Vec<TileFeature> {
 /// above its ground, and `[wall, roof, ground]` triangles, each counter-clockwise in (x, -y, z)
 /// seen from outside and facing the way its part says.
 fn assert_box(feature: &TileFeature, gml_id: &str, top: RangeInclusive<i32>, parts: [usize; 3]) {
-    assert_eq!(feature.properties(), [PropValue::Str(Some(gml_id.into()))]);
+    let [name, rest @ ..] = feature.properties() else {
+        panic!("{gml_id}: no properties");
+    };
+    assert_eq!(*name, PropValue::Str(Some(gml_id.into())));
+    assert!(rest.iter().all(PropValue::is_null), "{gml_id}: {rest:?}");
     let mut heights = feature.z().to_vec();
     heights.sort_unstable();
     heights.dedup();
