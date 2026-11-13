@@ -379,16 +379,17 @@ impl GeometryValues {
         self.vector_types.push(GeometryType::Mesh);
         let first_vertex = self.stored_vertex_count();
         let verts = self.vertices.get_or_insert_with(Vec::new);
-        let mut count = 0_u32;
-        for vertex in vertices {
-            verts.extend([vertex.x, vertex.y]);
-            count += 1;
-        }
+        let start = verts.len();
+        verts.extend(vertices.flat_map(|vertex| [vertex.x, vertex.y]));
+        let count = u32::try_from((verts.len() - start) / 2).expect("vertex count overflow");
         self.push_geometry_count(count);
 
         let offsets = self.triangle_offsets.get_or_insert_with(|| vec![0]);
-        let triangle_count = u32::try_from(triangles.len()).expect("triangle count overflow");
-        offsets.push(offsets.last().expect("offsets start at 0") + triangle_count);
+        let total = u32::try_from(triangles.len())
+            .ok()
+            .and_then(|n| offsets.last()?.checked_add(n))
+            .expect("triangle count overflow");
+        offsets.push(total);
         self.index_buffer.get_or_insert_with(Vec::new).extend(
             triangles
                 .as_flattened()

@@ -53,7 +53,7 @@ pub fn decode_geometry_types(
         .enumerate()
         .map::<MltResult<GeometryType>, _>(|(index, v)| {
             let geometry_type: GeometryType = u8::try_from(v)?.try_into()?;
-            if geometry_type == GeometryType::Mesh {
+            if geometry_type.is_mesh() {
                 return Err(MltError::MeshInTypesStream(index));
             }
             Ok(geometry_type)

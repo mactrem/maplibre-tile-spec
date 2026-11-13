@@ -260,7 +260,7 @@ pub enum ColumnRole {
     /// An ordinary column of values, a shared dictionary's children included.
     #[strum(serialize = "property")]
     Property,
-    /// A vertex-scoped column of the m-value section.
+    /// A column of the m-value section, with a value per vertex or per mesh triangle.
     #[cfg(feature = "unstable-v2")]
     #[strum(serialize = "m-value")]
     MValue,
@@ -283,10 +283,10 @@ pub struct TileLayer {
     pub(crate) property_names: Vec<String>,
     /// Column types, parallel to `TileFeature::properties`.
     pub(crate) property_kinds: Vec<PropKind>,
-    /// Vertex-scoped column names, parallel to `TileFeature::m_values`.
+    /// M-value column names, parallel to `TileFeature::m_values`.
     #[cfg(feature = "unstable-v2")]
     pub(crate) m_value_names: Vec<String>,
-    /// Vertex-scoped column types, parallel to `TileFeature::m_values`.
+    /// M-value column types, parallel to `TileFeature::m_values`.
     #[cfg(feature = "unstable-v2")]
     pub(crate) m_value_kinds: Vec<PropKind>,
     /// What each m-value column holds one value per, parallel to `TileFeature::m_values`.
@@ -1345,7 +1345,8 @@ impl PropValue {
     }
 }
 
-/// A feature's values for one vertex-scoped column: one per vertex, or none at all.
+/// A feature's values for one m-value column: one per vertex, or per triangle of a mesh
+/// for a [`MValueScope::Triangle`] column, or none at all.
 ///
 /// The option is around the whole vector because a null is a feature's, not a
 /// vertex's: a feature either measures every one of its vertices or none of them.

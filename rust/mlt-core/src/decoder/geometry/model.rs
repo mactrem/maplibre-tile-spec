@@ -103,5 +103,6 @@ pub enum GeometryType {
     ///
     /// Only a v2 layer with the `Meshes` layout holds one, and it names the type in its
     /// header byte, so no types stream may carry it.
+    #[cfg(feature = "unstable-v2")]
     Mesh,
 }

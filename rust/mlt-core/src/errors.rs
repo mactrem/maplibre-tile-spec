@@ -195,8 +195,12 @@ pub enum MltError {
         "a types stream names geometry type Mesh for feature {0}, which only a Meshes layer's header byte may name"
     )]
     MeshInTypesStream(usize),
+    #[cfg(feature = "unstable-v2")]
     #[error("meshes are a v2 feature, so layer {0} cannot be written as v1")]
     MeshNeedsV2(String),
+    #[cfg(feature = "unstable-v2")]
+    #[error("MVT has no meshes, so layer {0} cannot be written as MVT")]
+    MeshNotMvt(String),
     #[cfg(feature = "unstable-v2")]
     #[error(
         "uniform geometry type {0:?} cannot go with geometry layout {1}: a Mesh needs the Meshes layout, which holds nothing else"

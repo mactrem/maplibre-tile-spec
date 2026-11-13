@@ -20,6 +20,18 @@ use crate::errors::AsMltError as _;
 use crate::tile::ZStep;
 
 impl GeometryType {
+    /// Whether this is a mesh, which only a v2 layer holds.
+    #[must_use]
+    #[cfg_attr(
+        not(feature = "unstable-v2"),
+        expect(clippy::unused_self, reason = "only v2 has meshes")
+    )]
+    pub fn is_mesh(self) -> bool {
+        #[cfg(feature = "unstable-v2")]
+        return self == Self::Mesh;
+        #[cfg(not(feature = "unstable-v2"))]
+        false
+    }
     #[must_use]
     pub fn is_polygon(self) -> bool {
         matches!(self, Self::Polygon | Self::MultiPolygon)
@@ -419,6 +431,7 @@ impl GeometryValues {
     /// The triangles of feature `index` when it is a [`GeometryType::Mesh`], or [`None`] when it is not.
     ///
     /// Each corner names a vertex of the whole layer, within the feature's [`Self::vertex_range`].
+    #[cfg(feature = "unstable-v2")]
     pub fn mesh_triangles(&self, index: usize) -> MltResult<Option<&[[u32; 3]]>> {
         if self.vector_types.get(index) != Some(&GeometryType::Mesh) {
             return Ok(None);
@@ -559,7 +572,7 @@ impl GeometryValues {
             .ok_or_else(|| GeometryIndexOutOfBounds(index))?;
 
         if parts.is_none()
-            && geom_type != GeometryType::Mesh
+            && !geom_type.is_mesh()
             && let Some(indices) = self.index_buffer.as_deref()
         {
             let tris = self.triangle_offsets.as_deref().unwrap_or(&[]);
@@ -639,6 +652,7 @@ impl GeometryValues {
                     poly_from_rings(poly, part_rng, rings)
                 })
             }
+            #[cfg(feature = "unstable-v2")]
             GeometryType::Mesh => {
                 // A mesh's vertices are its run of the vertex stream, as a MultiPoint's are,
                 // which keeps them aligned with its z and m-values. The triangles are

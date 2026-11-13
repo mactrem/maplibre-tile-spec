@@ -185,7 +185,12 @@ impl LayerSource for TileLayer {
     }
 
     fn mvt_feature(&self, feature: usize, layer: MvtLayerBuilder) -> MltResult<MvtFeatureBuilder> {
-        Ok(layer.feature(&self.features[feature].geometry)?)
+        let feature = &self.features[feature];
+        #[cfg(feature = "unstable-v2")]
+        if feature.triangles.is_some() {
+            return Err(crate::MltError::MeshNotMvt(self.name.clone()));
+        }
+        Ok(layer.feature(&feature.geometry)?)
     }
 
     #[cfg(feature = "unstable-v2")]
