@@ -13,6 +13,7 @@ use crate::codecs::varint::parse_varint;
 use crate::decoder::nested::{
     RowShapes, parse_row_shapes, presence_popcount, reject_shaped_child_presence,
 };
+use crate::decoder::root02::check_header_layout;
 use crate::decoder::stream::header02;
 use crate::decoder::stream::header02::{
     Count02, EXTENSION_MASK, Family, HAS_EXPLICIT_COUNT, LOGICAL_MASK, PHYSICAL_MASK, StrLayout,
@@ -61,6 +62,7 @@ impl<'a> Walker<'a> {
             |b| format!("0x{b:02X} {:?}", layout.geometry),
             layer_layout_bits02,
         )?;
+        check_header_layout(header, layout)?;
 
         // The layer's shared presence bitfields, which columns read by index.
         let mut shared = Vec::with_capacity(usize::from(layout.shared_presence));

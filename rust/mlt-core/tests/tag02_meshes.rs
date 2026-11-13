@@ -392,7 +392,7 @@ fn a_triangle_scoped_value_needs_a_mesh_and_one_value_per_triangle() {
     mesh.m_value(key, MValue::U8(Some(vec![1, 2, 3]))).unwrap();
     assert_snapshot!(
         mesh.finish().unwrap_err(),
-        @"m-value 0 holds 3 values, but the mesh has 1 triangles"
+        @"m-value 0 holds 3 values, but needs one per triangle: 1"
     );
 
     let mut not_a_mesh = builder.feature(points());

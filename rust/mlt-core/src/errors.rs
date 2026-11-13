@@ -111,7 +111,7 @@ pub enum MltError {
     MValueImplicitCount { name: String, byte: u8 },
     #[cfg(feature = "unstable-v2")]
     #[error(
-        "m-value column {name} holds {actual} values, but its features have {expected} vertices or triangles"
+        "m-value column {name} holds {actual} values, but needs {expected}: one per vertex, or per triangle when triangle-scoped"
     )]
     MValueColumnLengthMismatch {
         name: String,
@@ -149,7 +149,7 @@ pub enum MltError {
         actual: usize,
     },
     #[cfg(feature = "unstable-v2")]
-    #[error("m-value {index} holds {actual} values, but the mesh has {expected} triangles")]
+    #[error("m-value {index} holds {actual} values, but needs one per triangle: {expected}")]
     MValueTriangleCountMismatch {
         index: usize,
         expected: usize,
@@ -218,6 +218,11 @@ pub enum MltError {
         "the geo lengths of a Meshes layer sum to {expected} vertices, but its vertex stream holds {actual}"
     )]
     MeshVertexCountMismatch { expected: usize, actual: usize },
+    #[cfg(feature = "unstable-v2")]
+    #[error(
+        "a Meshes layer of {expected} features holds {actual} geo lengths, not one per feature"
+    )]
+    MeshGeoLengthCount { expected: usize, actual: usize },
     #[cfg(feature = "unstable-v2")]
     #[error(
         "a triangle of mesh feature {feature} names vertex {vertex}, outside the feature's run {start}..{end}"

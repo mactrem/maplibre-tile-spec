@@ -363,19 +363,15 @@ fn decode_triangle_offsets(lengths: &[u32], dec: &mut Decoder) -> MltResult<Vec<
     Ok(offsets)
 }
 
-/// Check a `Meshes` section: `(x, y, z)` vertices, one run of them per feature as the
-/// geo lengths say, and triangles that name only vertices of their own feature's run.
+/// Check a `Meshes` section: one run of `(x, y, z)` vertices per feature as the geo lengths
+/// say, and triangles that name only vertices of their own feature's run.
 #[cfg(feature = "unstable-v2")]
 fn check_meshes(
-    has_z: bool,
     runs: Option<&[u32]>,
     triangle_offsets: Option<&[u32]>,
     indices: Option<&[u32]>,
     vertices: Option<&[i32]>,
 ) -> MltResult<()> {
-    if !has_z {
-        return Err(MltError::MeshWithoutZ);
-    }
     let runs = runs.unwrap_or(&[0]);
     let vertex_count = vertices.map_or(0, |v| v.len() / 3);
     let expected = runs.last().map_or(0, |&end| end.into_usize());
@@ -585,6 +581,21 @@ impl Decode<GeometryValues> for RawGeometry<'_> {
         }
 
         #[cfg(feature = "unstable-v2")]
+        if meshes {
+            if z_step.is_none() {
+                return Err(MltError::MeshWithoutZ);
+            }
+            let lengths = geometry_offsets.as_ref().map_or(0, Vec::len);
+            if lengths != vector_types.len() {
+                return Err(MltError::MeshGeoLengthCount {
+                    expected: vector_types.len(),
+                    actual: lengths,
+                });
+            }
+        } else if z_step.is_some_and(|step| step.datum() == ZDatum::Ground) {
+            return Err(MltError::GroundZWithoutMeshes);
+        }
+        #[cfg(feature = "unstable-v2")]
         let tree_cycles = match (tree_symbols, tree_cycles) {
             (None, None) => None,
             (Some(symbols), Some(cycles)) => {
@@ -595,10 +606,6 @@ impl Decode<GeometryValues> for RawGeometry<'_> {
                 "tree symbols and cycles come as a pair",
             ))?,
         };
-        #[cfg(feature = "unstable-v2")]
-        if !meshes && z_step.is_some_and(|step| step.datum() == ZDatum::Ground) {
-            return Err(MltError::GroundZWithoutMeshes);
-        }
 
         let triangles_only = !meshes && index_buffer.is_some() && part_offsets.is_none();
         if triangles_only {
@@ -654,7 +661,6 @@ impl Decode<GeometryValues> for RawGeometry<'_> {
         #[cfg(feature = "unstable-v2")]
         if meshes {
             check_meshes(
-                z_step.is_some(),
                 geometry_offsets.as_deref(),
                 triangle_offsets.as_deref(),
                 index_buffer.as_deref(),
@@ -725,20 +731,12 @@ mod tests {
     fn meshes_whose_triangles_stay_in_their_runs_pass() {
         let triangles = [0, 1, 2, 3, 4, 4];
         check_meshes(
-            true,
             Some(&RUNS),
             Some(&[0, 1, 2]),
             Some(&triangles),
             Some(&VERTICES),
         )
         .unwrap();
-    }
-
-    #[test]
-    fn meshes_need_z() {
-        let err =
-            check_meshes(false, Some(&RUNS), Some(&[0, 0, 0]), None, Some(&[0; 10])).unwrap_err();
-        assert!(matches!(err, MltError::MeshWithoutZ), "{err:?}");
     }
 
     #[rstest::rstest]
@@ -748,8 +746,7 @@ mod tests {
         #[case] vertices: &[i32],
         #[case] actual: usize,
     ) {
-        let err =
-            check_meshes(true, Some(&RUNS), Some(&[0, 0, 0]), None, Some(vertices)).unwrap_err();
+        let err = check_meshes(Some(&RUNS), Some(&[0, 0, 0]), None, Some(vertices)).unwrap_err();
         assert!(
             matches!(err, MltError::MeshVertexCountMismatch { expected: 5, actual: a } if a == actual),
             "{err:?}"
@@ -758,8 +755,7 @@ mod tests {
 
     #[test]
     fn every_feature_needs_a_triangle_length() {
-        let err =
-            check_meshes(true, Some(&RUNS), Some(&[0, 0]), None, Some(&VERTICES)).unwrap_err();
+        let err = check_meshes(Some(&RUNS), Some(&[0, 0]), None, Some(&VERTICES)).unwrap_err();
         assert!(matches!(err, MltError::MalformedTriangles(_)), "{err:?}");
     }
 
@@ -774,7 +770,6 @@ mod tests {
     ) {
         let offsets = [0, 1, u32::try_from(triangles.len() / 3).unwrap()];
         let err = check_meshes(
-            true,
             Some(&RUNS),
             Some(&offsets),
             Some(triangles),

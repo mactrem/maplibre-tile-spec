@@ -72,6 +72,22 @@ use crate::tile::{ColumnRole, Extent, reject_taken_name};
 use crate::utils::{SetOptionOnce as _, parse_string, parse_u8};
 use crate::{Lazy, MValueScope, MltError, MltRefResult, MltResult, Parser};
 
+/// Check that the header byte and the layout byte agree: m-values need a layout with vertex
+/// counts, and the uniform type `Mesh` goes with the `Meshes` layout and nothing else.
+pub(crate) fn check_header_layout(header: LayerHeader02, layout: LayerLayout) -> MltResult<()> {
+    if header.m_values && !layout.geometry.allows_m_values() {
+        return Err(MltError::MValuesNeedVertexCounts(layout.geometry.into()));
+    }
+    let mesh_type = header.uniform_type == Some(GeometryType::Mesh);
+    if mesh_type != (layout.geometry == GeoLayout::Meshes) {
+        return Err(MltError::MeshLayoutMismatch(
+            header.uniform_type,
+            layout.geometry.into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Parse a v2 layer body (the bytes after the `tag = 2` byte).
 pub(crate) fn parse_layer02<'a>(
     input: &'a [u8],
@@ -88,17 +104,7 @@ pub(crate) fn parse_layer02<'a>(
     let (input, feature_count) = parse_varint::<u32>(input)?;
     let (input, layout_byte) = parse_u8(input)?;
     let layout = LayerLayout::parse(layout_byte)?;
-
-    if header.m_values && !layout.geometry.allows_m_values() {
-        return Err(MltError::MValuesNeedVertexCounts(layout.geometry.into()));
-    }
-    let mesh_type = header.uniform_type == Some(GeometryType::Mesh);
-    if mesh_type != (layout.geometry == GeoLayout::Meshes) {
-        return Err(MltError::MeshLayoutMismatch(
-            header.uniform_type,
-            layout.geometry.into(),
-        ));
-    }
+    check_header_layout(header, layout)?;
 
     // ── Shared presence bitfields ─────────────────────────────────────────
     let (input, cols) = parse_shared_presence(input, layout, feature_count, parser)?;

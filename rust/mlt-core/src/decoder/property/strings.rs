@@ -402,7 +402,7 @@ impl<'a> RawStrings<'a> {
             } => {
                 let (data, lengths) = plain_data.decode_bytes(dec)?;
                 let offsets: Vec<u32> = offsets.decode_ints(dec)?;
-                let (dictionary, lengths) = rebuild_dictionary(dict, &lengths, data)?;
+                let (dictionary, lengths) = rebuild_dictionary(dict, &lengths, data, dec)?;
                 decode_dictionary_strings(
                     name,
                     &lengths,
@@ -428,13 +428,19 @@ impl<'a> RawStrings<'a> {
             } => {
                 let (data, lengths) = fsst_data.decode_bytes(dec)?;
                 let offsets: Vec<u32> = offsets.decode_ints(dec)?;
-                let (dictionary, lengths) = rebuild_dictionary(dict, &lengths, &data)?;
+                // A plain dictionary is the decompressed corpus itself, so it is kept, not copied.
+                let (dictionary, lengths) = if dict == DictLayout::Plain {
+                    (String::from_utf8(data)?, Cow::Borrowed(&*lengths))
+                } else {
+                    let (dictionary, lengths) = rebuild_dictionary(dict, &lengths, &data, dec)?;
+                    (dictionary.into_owned(), lengths)
+                };
                 decode_dictionary_strings(
                     name,
                     &lengths,
                     offsets,
                     presence.as_deref(),
-                    Cow::Owned(dictionary.into_owned()),
+                    Cow::Owned(dictionary),
                     dec,
                 )?
             }
@@ -483,16 +489,21 @@ fn to_absolute_lengths(
 ///
 /// A front-coded blob holds only suffixes, which are not valid UTF-8 on their own, so the
 /// conversion happens here rather than when the blob is read.
+#[cfg_attr(
+    not(feature = "unstable-v2"),
+    expect(unused_variables, reason = "only front coding allocates")
+)]
 pub(crate) fn rebuild_dictionary<'d, 'l>(
     dict: DictLayout,
     lengths: &'l [u32],
     data: &'d [u8],
+    dec: &mut Decoder,
 ) -> MltResult<(Cow<'d, str>, Cow<'l, [u32]>)> {
     match dict {
         DictLayout::Plain => Ok((Cow::Borrowed(str::from_utf8(data)?), Cow::Borrowed(lengths))),
         #[cfg(feature = "unstable-v2")]
         DictLayout::FrontCoded => {
-            let (entries, entry_lengths) = front_decode(FrontLengths::split(lengths)?, data)?;
+            let (entries, entry_lengths) = front_decode(FrontLengths::split(lengths)?, data, dec)?;
             Ok((Cow::Owned(entries), Cow::Owned(entry_lengths)))
         }
     }
@@ -508,10 +519,14 @@ fn decode_dictionary_strings<'a>(
     dict_data: Cow<'a, str>,
     dec: &mut Decoder,
 ) -> MltResult<ParsedStrings<'a>> {
-    for span in shared_dict_spans(dict_lengths, dec)? {
-        dict_span_str(&dict_data, span)?;
+    let mut lengths = dec.alloc(dict_lengths.len())?;
+    let mut end = 0_i32;
+    for &len in dict_lengths {
+        let start = end;
+        end = checked_absolute_end(end, len)?;
+        dict_span_str(&dict_data, (start.unsigned_abs(), end.unsigned_abs()))?;
+        lengths.push(end);
     }
-    let lengths = to_absolute_lengths(dict_lengths, None, dec)?;
     let entries = u32::try_from(dict_lengths.len()).unwrap_or(u32::MAX);
     let entry = |idx: u32| {
         if idx < entries {
@@ -593,14 +608,14 @@ impl<'a> RawSharedDict<'a> {
         let (data, dict_spans) = match self.encoding {
             RawSharedDictEncoding::Plain(plain_data) => {
                 let (blob, lengths) = plain_data.decode_bytes(dec)?;
-                let (entries, lengths) = rebuild_dictionary(self.dict, &lengths, blob)?;
+                let (entries, lengths) = rebuild_dictionary(self.dict, &lengths, blob, dec)?;
                 let dict_spans = shared_dict_spans(&lengths, dec)?;
                 (entries, dict_spans)
             }
             RawSharedDictEncoding::FsstPlain(fsst_data) => {
                 let (blob, lengths) = fsst_data.decode_bytes(dec)?;
                 // `entries` borrows the decompressed corpus, which is local, so it is taken owned.
-                let (entries, lengths) = rebuild_dictionary(self.dict, &lengths, &blob)?;
+                let (entries, lengths) = rebuild_dictionary(self.dict, &lengths, &blob, dec)?;
                 let (entries, lengths) = (entries.into_owned(), lengths.into_owned());
                 let dict_spans = shared_dict_spans(&lengths, dec)?;
                 (Cow::Owned(entries), dict_spans)
