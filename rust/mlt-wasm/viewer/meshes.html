@@ -168,11 +168,14 @@ const tileWidth = (z) => origin.scale / 2 ** z;
 /** The metres east and south of the origin of a tile's north-west corner. */
 const corner = (z, x, y) => [(x / 2 ** z - origin.u) * origin.scale, (y / 2 ** z - origin.v) * origin.scale];
 
+/** Metres: how low and high a building may stand, widened by each tile of elevations drawn. */
+const heights = { low: 0, high: MAX_HEIGHT };
+
 /** Sets `box` to where a tile's buildings may stand. */
 function tileBox({ z, x, y }, box) {
   const [east, south] = corner(z, x, y), w = tileWidth(z);
-  box.min.set(east - OVERHANG, 0, south - OVERHANG);
-  box.max.set(east + w + OVERHANG, MAX_HEIGHT, south + w + OVERHANG);
+  box.min.set(east - OVERHANG, heights.low, south - OVERHANG);
+  box.max.set(east + w + OVERHANG, heights.high, south + w + OVERHANG);
   return box;
 }
 
@@ -195,6 +198,7 @@ async function directoryTiles(base) {
   const response = await fetch(`${base}/index.json`);
   if (!response.ok) throw new Error(`${response.url}: ${response.status} ${response.statusText}`);
   const keys = new Set(await response.json());
+  if (keys.size === 0) throw new Error(`${response.url} lists no tiles`);
   const all = [...keys].map((key) => key.split("/").map(Number));
   let [minZoom, maxZoom, u0, v0, u1, v1] = [Infinity, -Infinity, 1, 1, 0, 0];
   for (const [z, x, y] of all) {
@@ -452,7 +456,7 @@ async function load(t) {
 function decode({ z, x, y, key }, data) {
   const layers = decodeTileColumns(data).filter((l) => l.geometry.types.length > 0 && l.geometry.types.every((g) => g === MESH));
   const entry = { z, x, y, key, layers, triangles: layers.reduce((sum, l) => sum + l.geometry.indexBuffer.length / 3, 0) };
-  if (layers.some((l) => l.mValues?.some((c) => c.name === "color"))) enableByPart(true);
+  if (layers.some((l) => rgbColumn(l) !== undefined)) enableByPart(true);
   if (layers.length > 0) entry.mesh = buildMesh(entry);
   return entry;
 }
@@ -462,16 +466,21 @@ function decode({ z, x, y, key }, data) {
  * its value at vertex or triangle `i`, by its `scope`.
  */
 function colorColumn(layer) {
-  const part = layer.mValues?.find((c) => c.name === "part");
-  const rgb = layer.mValues?.find((c) => c.name === "color");
-  if ($("byPart").checked && part && !part.present) {
+  const part = layer.mValues?.find((c) => c.name === "part" && c.type === "string" && !c.present);
+  const rgb = rgbColumn(layer);
+  if ($("byPart").checked && part) {
     const colors = part.dictionary.map((name) => new THREE.Color(PARTS[name] ?? 0xff00ff));
     return { scope: part.scope, key: (i) => part.codes[i], paint: (key, c) => c.copy(colors[key]) };
   }
-  if (rgb && !rgb.present) {
+  if (rgb) {
     return { scope: rgb.scope, key: (i) => rgb.values[i], paint: (key, c) => c.setHex(key, THREE.SRGBColorSpace) };
   }
   return undefined;
+}
+
+/** A layer's numeric `color` m-value, if every feature has it. */
+function rgbColumn(layer) {
+  return layer.mValues?.find((c) => c.name === "color" && c.type !== "string" && !c.present);
 }
 
 /**
@@ -513,6 +522,9 @@ function layerArrays(layer, width) {
   const g = layer.geometry;
   const n = g.vertices.length / 3;
   const zScale = 10 ** g.zStep;
+  // An elevation is above Terrain-RGB's base of -10000 m, a height above the ground.
+  const base = g.zDatum === "ground" ? 0 : -10000;
+  let [low, high] = [Infinity, -Infinity];
   const colors = colorColumn(layer);
   const { index, source, keys } = colors?.scope === "triangle"
     ? splitByTriangle(g.indexBuffer, n, colors.key)
@@ -528,7 +540,9 @@ function layerArrays(layer, width) {
     const v = source ? source[o] : o;
     featureOf[o] = featureOfVertex[v];
     position[o * 3] = (g.vertices[v * 3] / layer.extent) * width;
-    position[o * 3 + 1] = g.vertices[v * 3 + 2] * zScale;
+    const up = base + g.vertices[v * 3 + 2] * zScale;
+    [low, high] = [Math.min(low, up), Math.max(high, up)];
+    position[o * 3 + 1] = up;
     position[o * 3 + 2] = (g.vertices[v * 3 + 1] / layer.extent) * width;
     if (colors) colors.paint(keys ? keys[o] : colors.key(v), c);
     else c.setHex(0xcccccc);
@@ -536,19 +550,23 @@ function layerArrays(layer, width) {
     color[o * 4 + 1] = Math.round(c.g * 255);
     color[o * 4 + 2] = Math.round(c.b * 255);
   }
+  if (g.zDatum !== "ground" && count > 0) {
+    [heights.low, heights.high] = [Math.min(heights.low, low), Math.max(heights.high, high)];
+  }
   return { position, color, featureOf, index };
 }
 
 /**
  * A tile's layers as one THREE mesh at its corner, so one draw call; `firstIndex` is where each layer's
- * triangles start. Colours are 4 bytes and, under 65536 vertices, indices 2, as fewer bytes upload faster.
+ * triangles start. Colours are 4 bytes and, under 65535 vertices, indices 2, as fewer bytes upload faster:
+ * WebGL 2 restarts primitives at index 0xFFFF, so a 2-byte index never names that vertex.
  */
 function buildMesh(entry) {
   const parts = entry.layers.map((layer) => layerArrays(layer, tileWidth(entry.z)));
   const vertices = parts.reduce((sum, p) => sum + p.featureOf.length, 0);
   const position = new Float32Array(vertices * 3), color = new Uint8Array(vertices * 4);
   const featureOf = new Uint32Array(vertices);
-  const index = new (vertices <= 65536 ? Uint16Array : Uint32Array)(entry.triangles * 3);
+  const index = new (vertices < 0xffff ? Uint16Array : Uint32Array)(entry.triangles * 3);
   const firstIndex = [];
   let v = 0, i = 0;
   for (const p of parts) {
