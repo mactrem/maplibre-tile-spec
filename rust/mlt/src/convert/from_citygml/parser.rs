@@ -8,7 +8,7 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 /// The part of a building a triangle belongs to, its `part` m-value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Part {
     Wall,
     Roof,
@@ -52,7 +52,8 @@ pub struct Polygon {
 }
 
 /// A building, bridge or tunnel, with the polygons of the highest LOD of each of its parts and
-/// of its LOD2.
+/// of its LOD2. A part whose polygons all lie in semantic surfaces has these of its walls, with
+/// their windows and doors, of its roofs and of its grounds each.
 ///
 /// The LOD2 of a part whose highest LOD is above 2 is its highest LOD of 2 or less or, without
 /// one, its highest LOD without windows, doors and installations, and with the holes of the
@@ -349,17 +350,32 @@ impl Parser {
         let Some(mut building) = self.building.take() else {
             return;
         };
-        // The highest LOD of each owner, and its highest LOD of 2 or less.
-        let mut best: HashMap<u32, (u8, Option<u8>)> = HashMap::new();
-        for &(owner, lod, _) in &self.polygons {
-            let (highest, low) = best.entry(owner).or_insert((lod, None));
+        // An owner whose polygons all lie in semantic surfaces picks the LODs of its walls,
+        // roofs and grounds each on its own; any other picks them for all its polygons at once.
+        let mut unsplit = HashSet::new();
+        for (owner, _, polygon) in &self.polygons {
+            if polygon.part.is_none() {
+                unsplit.insert(*owner);
+            }
+        }
+        let key = |owner: u32, part: Option<Part>| {
+            let kind = part.filter(|_| !unsplit.contains(&owner)).map(|p| match p {
+                Part::Wall | Part::Window | Part::Door => Part::Wall,
+                Part::Roof | Part::Ground => p,
+            });
+            (owner, kind)
+        };
+        // The highest LOD of each key, and its highest LOD of 2 or less.
+        let mut best: HashMap<(u32, Option<Part>), (u8, Option<u8>)> = HashMap::new();
+        for &(owner, lod, ref polygon) in &self.polygons {
+            let (highest, low) = best.entry(key(owner, polygon.part)).or_insert((lod, None));
             *highest = (*highest).max(lod);
             if lod <= 2 {
                 *low = (*low).max(Some(lod));
             }
         }
         for (owner, lod, polygon) in self.polygons.drain(..) {
-            let Some(&(highest, low)) = best.get(&owner) else {
+            let Some(&(highest, low)) = best.get(&key(owner, polygon.part)) else {
                 continue;
             };
             let lods = if lod != highest {
@@ -533,12 +549,13 @@ mod tests {
     }
 
     #[test]
-    fn lod2_is_the_highest_lod_of_2_or_less_a_part_has_of_its_own() {
+    fn walls_roofs_and_grounds_each_pick_their_highest_lod_and_lod2() {
         let xml = format!(
-            "{HEAD}<bldg:Building>{}{}{}</bldg:Building></core:CityModel>",
+            "{HEAD}<bldg:Building>{}{}{}{}</bldg:Building></core:CityModel>",
             surface("WallSurface", 1, &polygon(&[&SQUARE])),
             surface("WallSurface", 3, &polygon(&[&SQUARE, &HOLE])),
             surface("RoofSurface", 2, &polygon(&[&SQUARE, &HOLE])),
+            surface("GroundSurface", 1, &polygon(&[&SQUARE])),
         );
         let document = parse(xml.as_bytes()).unwrap();
         let polygons: Vec<_> = document.buildings[0]
@@ -549,10 +566,32 @@ mod tests {
         assert_eq!(
             polygons,
             [
+                (Some(Part::Wall), Lods::Lod2, 1),
                 (Some(Part::Wall), Lods::Highest, 2),
-                (Some(Part::Roof), Lods::Lod2, 2),
+                (Some(Part::Roof), Lods::Both, 2),
+                (Some(Part::Ground), Lods::Both, 1),
             ]
         );
+    }
+
+    #[test]
+    fn a_part_with_a_polygon_outside_semantic_surfaces_picks_its_lods_at_once() {
+        let solid = format!(
+            "<bldg:lod1MultiSurface><gml:MultiSurface><gml:surfaceMember>{}</gml:surfaceMember>\
+             </gml:MultiSurface></bldg:lod1MultiSurface>",
+            polygon(&[&SQUARE]),
+        );
+        let xml = format!(
+            "{HEAD}<bldg:Building>{solid}{}</bldg:Building></core:CityModel>",
+            surface("RoofSurface", 2, &polygon(&[&SQUARE])),
+        );
+        let document = parse(xml.as_bytes()).unwrap();
+        let polygons: Vec<_> = document.buildings[0]
+            .polygons
+            .iter()
+            .map(|p| (p.part, p.lods))
+            .collect();
+        assert_eq!(polygons, [(Some(Part::Roof), Lods::Both)]);
     }
 
     #[test]
