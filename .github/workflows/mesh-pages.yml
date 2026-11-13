@@ -11,14 +11,15 @@ on:
   workflow_dispatch:
     inputs:
       gml:
-        description: 'CityGML file or directory to tile, relative to rust/'
-        default: '../test/fixtures/meshes/buildings.gml'
+        description: 'CityGML file or directory to tile, relative to rust/; empty shows the Hamburg release, if any'
+        default: ''
 
 permissions: {}
 
+# A deployment cut short can leave Pages half published, so a newer run waits for it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
