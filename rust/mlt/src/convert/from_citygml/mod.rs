@@ -180,20 +180,26 @@ pub(super) fn convert(args: &ConvertArgs, reencoder: &Reencoder) -> AnyResult<()
                 tiles.entry(tile).or_default().push((id, building, placed));
             }
         }
-        written += tiles.len();
-        tiles
+        written += tiles
             .into_par_iter()
-            .try_for_each(|(tile, placed)| -> AnyResult<()> {
+            .map(|(tile, placed)| -> AnyResult<usize> {
                 let at = format!("{}/{}/{}", tile.zoom, tile.x, tile.y);
-                let layer = layer(&name, tile, z_step, placed)?;
+                let Some(layer) = layer(&name, tile, z_step, placed)? else {
+                    return Ok(0);
+                };
                 let bytes = reencoder
                     .encode(layer)
                     .with_context(|| format!("encoding tile {at}"))?;
+                if bytes.is_empty() {
+                    return Ok(0);
+                }
                 let dir = output.join(tile.zoom.to_string()).join(tile.x.to_string());
                 fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
                 let path = dir.join(format!("{}.mlt", tile.y));
-                fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))
-            })?;
+                fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
+                Ok(1)
+            })
+            .try_reduce(|| 0, |a, b| Ok(a + b))?;
     }
     eprintln!(
         "{} -> {}: wrote {written} tile(s) holding {} building(s) of {} file(s) at zooms {min_zoom}..={max_zoom}",
@@ -587,18 +593,22 @@ fn cluster(surfaces: &[&Surface], points: &[Vec<[i32; 3]>], cell: [f64; 3]) -> O
         .triangles
         .iter()
         .zip(&mesh.parts)
-        .filter(|&(&[a, b, c], _)| {
-            seen.insert(if b < a && b < c {
-                [b, c, a]
-            } else if c < a && c < b {
-                [c, a, b]
-            } else {
-                [a, b, c]
-            })
-        })
+        .filter(|&(t, _)| seen.insert(rotated(*t)))
         .map(|(&t, &p)| (t, p))
         .unzip();
     Some(mesh)
+}
+
+/// The triangle turned to start at its least vertex, alike for the triangles that wind alike
+/// through the same vertices.
+fn rotated([a, b, c]: [u32; 3]) -> [u32; 3] {
+    if b < a && b < c {
+        [b, c, a]
+    } else if c < a && c < b {
+        [c, a, b]
+    } else {
+        [a, b, c]
+    }
 }
 
 /// The block of `surfaces` at `points` on a grid of `pixel` units per pixel: the outline of
@@ -648,6 +658,9 @@ fn block(
         ];
         triangles = facing_down(&xyz, &[[0, 1, 2], [0, 2, 3]]);
     }
+    // Grounds snapped onto each other would count their edges twice, leaving out their walls.
+    let mut seen = HashSet::new();
+    triangles.retain(|&t| seen.insert(rotated(t)));
     let edges = |&[a, b, c]: &[u32; 3]| [[a, b], [b, c], [c, a]];
     let mut uses: HashMap<[u32; 2], u32> = HashMap::new();
     for [a, b] in triangles.iter().flat_map(edges) {
@@ -708,13 +721,13 @@ fn snap(v: i32, cell: f64) -> i32 {
 
 /// The layer of a tile's buildings, each with its feature id, the footprints merged into blocks.
 /// A block takes the id of the first building it holds that no other feature has, and counts
-/// them in a `buildings` property.
+/// them in a `buildings` property. `None` if no building leaves a triangle.
 fn layer(
     name: &str,
     tile: Tile,
     z_step: ZStep,
     placed: Vec<(u64, &Building, Placed)>,
-) -> AnyResult<TileLayer> {
+) -> AnyResult<Option<TileLayer>> {
     let mut meshes = Vec::new();
     let (mut ids, mut footprints) = (Vec::new(), Vec::new());
     for (id, building, placed) in placed {
@@ -743,6 +756,10 @@ fn layer(
             .context("a block holds more buildings than a u32 counts")?;
         meshes.push((id, None, Some(count), block.mesh));
     }
+    meshes.retain(|m| !m.3.triangles.is_empty());
+    if meshes.is_empty() {
+        return Ok(None);
+    }
 
     let mut builder = TileLayer::builder(name, tile.extent())?;
     builder.set_z_step(z_step)?;
@@ -753,7 +770,7 @@ fn layer(
         .then(|| builder.add_property("buildings", PropKind::U32))
         .transpose()?;
     let part = builder.add_scoped_m_value("part", PropKind::Str, MValueScope::Triangle)?;
-    for (id, name, count, mesh) in meshes.into_iter().filter(|m| !m.3.triangles.is_empty()) {
+    for (id, name, count, mesh) in meshes {
         let points = mesh.xyz.iter().map(|&[x, y, _]| Point::new(x, y)).collect();
         let mut feature = builder.feature(Geometry::MultiPoint(MultiPoint(points)));
         feature.id(id);
@@ -767,7 +784,7 @@ fn layer(
         feature.m_value(part, MValue::Str(Some(parts)))?;
         feature.finish()?;
     }
-    Ok(builder.finish())
+    Ok(Some(builder.finish()))
 }
 
 #[cfg(test)]
@@ -817,6 +834,26 @@ mod tests {
         let mesh = cluster(&[&wall], &points, [10.0, 10.0, 10.0]).unwrap();
         assert_eq!(mesh.xyz, [[0, 0, 0], [100, 0, 0], [0, 0, 100]]);
         assert_eq!(mesh.triangles, [[0, 1, 2], [2, 1, 0]]);
+    }
+
+    #[test]
+    fn grounds_on_top_of_each_other_make_one_block_with_its_walls() {
+        let triangles = vec![[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]];
+        let reversed = triangles.iter().map(|&[a, b, c]| [a, c, b]).collect();
+        let (ground, again) = (
+            surface(Part::Ground, triangles),
+            surface(Part::Ground, reversed),
+        );
+        let square = vec![
+            [0, 0, 7],
+            [100, 0, 7],
+            [100, 100, 7],
+            [0, 100, 7],
+            [50, 50, 7],
+        ];
+        let points = [square.clone(), square];
+        let mesh = block(&[&ground, &again], &points, 1.0, BLOCK_MIN_PIXELS).unwrap();
+        assert_eq!([count(&mesh, Part::Wall), count(&mesh, Part::Roof)], [8, 4]);
     }
 
     #[test]

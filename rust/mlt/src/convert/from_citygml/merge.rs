@@ -759,6 +759,18 @@ mod tests {
     }
 
     #[test]
+    fn footprints_too_far_apart_for_one_raster_are_merged_each_on_its_own() {
+        // 3002 by 3002 cells together, more than MAX_CELLS.
+        let houses = [
+            rectangle([0, 0], [20, 20], 600),
+            rectangle([30_000, 30_000], [30_020, 30_020], 800),
+        ];
+        let blocks = merge(&houses, 10.0, centimetres(), MIN_WALL);
+        let members: Vec<&[usize]> = blocks.iter().map(|b| &b.members[..]).collect();
+        assert_eq!(members, [[0], [1]]);
+    }
+
+    #[test]
     fn a_taller_band_stays_apart_and_only_the_part_above_its_neighbour_is_walled() {
         let buildings = [
             rectangle([0, 0], [20, 20], 600),
