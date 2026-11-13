@@ -254,6 +254,59 @@ proptest! {
 }
 
 #[test]
+fn a_corrupted_byte_anywhere_fails_to_decode_or_decodes_but_never_panics() {
+    let layer = mesh_layer(&[cube(0, 0), cube(700, 0), (vec![[5, 5, 5]], Vec::new())]);
+    let bytes = layer.encode(cfg_v2()).unwrap();
+    for offset in 0..bytes.len() {
+        for flip in [0x01, 0x10, 0x80, 0xFF] {
+            let mut corrupted = bytes.clone();
+            corrupted[offset] ^= flip;
+            if let Ok(layers) = Parser::default().parse_layers(&corrupted) {
+                for layer in layers {
+                    if let Layer::Tag02(layer) = layer {
+                        let _ = layer.into_tile(&mut Decoder::default());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_missing_triangle_value_stays_missing() {
+    let mut builder = TileLayer::builder("landmarks", 16384).unwrap();
+    builder.set_z_step(height()).unwrap();
+    let face = builder
+        .add_scoped_m_value("face", PropKind::I32, MValueScope::Triangle)
+        .unwrap();
+    for (id, faces) in [(0, Some(vec![7; 12])), (1, None)] {
+        let (vertices, triangles) = cube(id * 700, 0);
+        let points = vertices.iter().map(|&[x, y, _]| Point::new(x, y));
+        let mut feature = builder.feature(Geometry::MultiPoint(points.collect()));
+        feature.id(Some(id.unsigned_abs().into()));
+        feature.z(vertices.iter().map(|v| v[2]).collect()).unwrap();
+        feature.triangles(triangles).unwrap();
+        feature.m_value(face, MValue::I32(faces)).unwrap();
+        feature.finish().unwrap();
+    }
+    let bytes = builder.finish().encode(cfg_v2()).unwrap();
+    let back = try_decode(&bytes).unwrap();
+    let mut faces: Vec<_> = back
+        .features()
+        .iter()
+        .map(|f| (f.id(), f.m_values()[0].clone()))
+        .collect();
+    faces.sort_by_key(|f| f.0);
+    assert_eq!(
+        faces,
+        [
+            (Some(0), MValue::I32(Some(vec![7; 12]))),
+            (Some(1), MValue::I32(None)),
+        ]
+    );
+}
+
+#[test]
 fn geojson_writes_a_mesh_as_a_multi_point_with_triangles() {
     let mesh = (vec![[0, 0, 0], [10, 0, 0], [0, -10, 250]], vec![[0, 1, 2]]);
     let bytes = mesh_layer(&[mesh]).encode(cfg_v2()).unwrap();
