@@ -30,7 +30,10 @@ pub fn epsg_of_srs_name(name: &str) -> Option<u16> {
         .chars()
         .take_while(char::is_ascii_digit)
         .collect();
-    zone.parse::<u16>().ok().map(|zone| 25800 + zone)
+    zone.parse::<u16>()
+        .ok()
+        .filter(|zone| (1..=60).contains(zone))
+        .map(|zone| 25800 + zone)
 }
 
 /// Positions of one CRS to longitude and latitude in radians on WGS84, heights unchanged.
@@ -65,10 +68,7 @@ impl Reprojector {
         }
         transform(&self.src, &self.dst, &mut Points(points))
             .map_err(|e| anyhow!("reprojecting from EPSG:{}: {e}", self.epsg))?;
-        if points
-            .iter()
-            .any(|p| !p[0].is_finite() || !p[1].is_finite())
-        {
+        if points.iter().any(|p| p.iter().any(|v| !v.is_finite())) {
             bail!("a position does not reproject from EPSG:{}", self.epsg);
         }
         Ok(())
@@ -108,6 +108,8 @@ mod tests {
         }
         assert_eq!(epsg_of_srs_name("local"), None);
         assert_eq!(epsg_of_srs_name("EPSG:"), None);
+        assert_eq!(epsg_of_srs_name("urn:adv:crs:ETRS89_UTM60000"), None);
+        assert_eq!(epsg_of_srs_name("urn:adv:crs:ETRS89_UTM0"), None);
     }
 
     #[test]

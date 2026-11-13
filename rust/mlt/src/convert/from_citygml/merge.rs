@@ -20,6 +20,9 @@ const SAMPLES: usize = 2;
 const TOLERANCE_CELLS: f64 = 1.0;
 /// The label of a cell in no group.
 const NONE: usize = usize::MAX;
+/// The most cells a raster holds, 2048 squared: four tiles of pixels across. Each cell costs
+/// about 24 bytes.
+const MAX_CELLS: usize = 1 << 22;
 /// The steps from a corner of the cells to the next, east, south, west and north.
 const STEPS: [[i64; 2]; 4] = [[1, 0], [0, 1], [-1, 0], [0, -1]];
 
@@ -82,15 +85,40 @@ pub(super) struct Merged {
 /// height band raised from 0 to its mean top, with walls where it stands at least `min_wall` z
 /// units above its neighbours or the ground. A block of more corners than a `u32` indexes is
 /// left out.
+///
+/// Footprints spanning more than [`MAX_CELLS`] together are merged each on its own, and one
+/// spanning more on its own is left out.
 pub(super) fn merge(
     footprints: &[Footprint],
     cell: f64,
     z_step: ZStep,
     min_wall: i32,
 ) -> Vec<Merged> {
-    let Some(mut raster) = Raster::new(footprints, cell) else {
-        return Vec::new();
-    };
+    if let Some(blocks) = merge_within(footprints, cell, z_step, min_wall) {
+        return blocks;
+    }
+    (0..footprints.len())
+        .flat_map(|f| {
+            let blocks = merge_within(&footprints[f..=f], cell, z_step, min_wall);
+            blocks.into_iter().flatten().map(move |mut block| {
+                block.members = vec![f];
+                block
+            })
+        })
+        .collect()
+}
+
+/// [`merge`], or `None` if the footprints span more than [`MAX_CELLS`].
+fn merge_within(
+    footprints: &[Footprint],
+    cell: f64,
+    z_step: ZStep,
+    min_wall: i32,
+) -> Option<Vec<Merged>> {
+    if footprints.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut raster = Raster::new(footprints, cell)?;
     #[expect(
         clippy::cast_possible_truncation,
         reason = "a band is a few metres in z units of at least a millimetre"
@@ -133,7 +161,7 @@ pub(super) fn merge(
             ]);
         }
     }
-    groups
+    let blocks = groups
         .into_iter()
         .zip(walls.into_iter().zip(sides))
         .filter_map(|((members, top), (walls, sides))| {
@@ -146,7 +174,8 @@ pub(super) fn merge(
                 mesh: weld(&walls, &roof)?,
             })
         })
-        .collect()
+        .collect();
+    Some(blocks)
 }
 
 /// The cells of a tile's footprints, by row from the north-west one at `origin`.
@@ -165,6 +194,8 @@ struct Raster {
 }
 
 impl Raster {
+    /// The raster of `footprints`, or `None` without a footprint or if they span more than
+    /// [`MAX_CELLS`].
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -179,7 +210,11 @@ impl Raster {
         let ([Some(x0), Some(y0)], [Some(x1), Some(y1)]) = (min, max) else {
             return None;
         };
-        let (width, height) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
+        let cells = |lo: i64, hi: i64| usize::try_from(hi - lo + 1).ok();
+        let (width, height) = (cells(x0, x1)?, cells(y0, y1)?);
+        if width.checked_mul(height)? > MAX_CELLS {
+            return None;
+        }
         let mut raster = Self {
             origin: [x0, y0],
             width,

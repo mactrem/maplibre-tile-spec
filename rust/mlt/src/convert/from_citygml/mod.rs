@@ -86,21 +86,25 @@ const HIGHEST_ERROR_METRES: f64 = 0.05;
 const ERROR_PIXELS: f64 = 1.0 / 3.0;
 
 /// Whether `path` is a `CityGML` file, or a directory whose first `.gml` file comes before any tile.
-pub(super) fn is_citygml(path: &Path) -> bool {
+pub(super) fn is_citygml(path: &Path) -> AnyResult<bool> {
     if path.is_file() {
-        return is_gml(path);
+        return Ok(is_gml(path));
     }
-    WalkDir::new(path)
-        .sort_by_file_name()
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .find_map(|e| match e.path().extension().and_then(|x| x.to_str()) {
-            Some("mlt" | "mvt" | "pbf") => Some(false),
-            _ if is_gml(e.path()) => Some(true),
-            _ => None,
-        })
-        .unwrap_or(false)
+    if !path.is_dir() {
+        return Ok(false);
+    }
+    for entry in WalkDir::new(path).sort_by_file_name() {
+        let entry = entry.with_context(|| format!("searching {}", path.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        match entry.path().extension().and_then(|x| x.to_str()) {
+            Some("mlt" | "mvt" | "pbf") => return Ok(false),
+            _ if is_gml(entry.path()) => return Ok(true),
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 fn is_gml(path: &Path) -> bool {
@@ -163,26 +167,34 @@ pub(super) fn convert(args: &ConvertArgs, reencoder: &Reencoder) -> AnyResult<()
         .flat_map(|f| f.buildings)
         .collect();
 
-    let mut tiles: BTreeMap<Tile, Vec<(u64, &Building, Placed)>> = BTreeMap::new();
-    for (id, building) in (0..).zip(&buildings) {
-        for (tile, placed) in place(building, min_zoom..=max_zoom, z_step) {
-            tiles.entry(tile).or_default().push((id, building, placed));
+    // One zoom at a time, so that only its placed meshes are held at once.
+    let mut written = 0;
+    for zoom in min_zoom..=max_zoom {
+        let placed: Vec<Option<(Tile, Placed)>> = buildings
+            .par_iter()
+            .map(|building| place(building, zoom, max_zoom, z_step))
+            .collect();
+        let mut tiles: BTreeMap<Tile, Vec<(u64, &Building, Placed)>> = BTreeMap::new();
+        for ((id, building), placed) in (0..).zip(&buildings).zip(placed) {
+            if let Some((tile, placed)) = placed {
+                tiles.entry(tile).or_default().push((id, building, placed));
+            }
         }
+        written += tiles.len();
+        tiles
+            .into_par_iter()
+            .try_for_each(|(tile, placed)| -> AnyResult<()> {
+                let at = format!("{}/{}/{}", tile.zoom, tile.x, tile.y);
+                let layer = layer(&name, tile, z_step, placed)?;
+                let bytes = reencoder
+                    .encode(layer)
+                    .with_context(|| format!("encoding tile {at}"))?;
+                let dir = output.join(tile.zoom.to_string()).join(tile.x.to_string());
+                fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+                let path = dir.join(format!("{}.mlt", tile.y));
+                fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))
+            })?;
     }
-    let written = tiles.len();
-    tiles
-        .into_par_iter()
-        .try_for_each(|(tile, placed)| -> AnyResult<()> {
-            let at = format!("{}/{}/{}", tile.zoom, tile.x, tile.y);
-            let layer = layer(&name, tile, z_step, placed)?;
-            let bytes = reencoder
-                .encode(layer)
-                .with_context(|| format!("encoding tile {at}"))?;
-            let dir = output.join(tile.zoom.to_string()).join(tile.x.to_string());
-            fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-            let path = dir.join(format!("{}.mlt", tile.y));
-            fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))
-        })?;
     eprintln!(
         "{} -> {}: wrote {written} tile(s) holding {} building(s) of {} file(s) at zooms {min_zoom}..={max_zoom}",
         input.display(),
@@ -459,64 +471,47 @@ enum Placed {
     Footprint(Footprint),
 }
 
-/// `building` on the tile of each of `zooms` that holds the centre of its bounding box: at its
-/// highest LOD at the highest zoom, at LOD2 one zoom below and as a block below that, or from
-/// [`MERGE_BELOW`] zooms below as its footprint unless it is a landmark.
-/// A zoom is left out where the building has no triangle, does not fit the tile's grid, or has
+/// `building` at `zoom` on the tile that holds the centre of its bounding box: at its highest LOD
+/// at `max_zoom`, at LOD2 one zoom below and as a block below that, or from [`MERGE_BELOW`] zooms
+/// below as its footprint unless it is a landmark.
+/// Nothing is placed where the building has no triangle, does not fit the tile's grid, or has
 /// more vertices or triangle corners than a `u32` indexes.
-fn place(
-    building: &Building,
-    zooms: std::ops::RangeInclusive<u8>,
-    z_step: ZStep,
-) -> Vec<(Tile, Placed)> {
-    let max_zoom = *zooms.end();
-    let highest = View::new(building.surfaces.iter().filter(|s| s.lods != Lods::Lod2));
-    let lod2 = (zooms.start() < zooms.end())
-        .then(|| View::new(building.surfaces.iter().filter(|s| s.lods != Lods::Highest)))
-        .flatten();
-    let mut placed = Vec::new();
-    for zoom in zooms {
-        let below = max_zoom - zoom;
-        let Some(view) = (if below == 0 { &highest } else { &lod2 }) else {
-            continue;
-        };
-        let tile = Tile::of(view.centre, zoom);
-        let extent = tile.extent();
-        let Some(points) = view.points(tile, extent, z_step) else {
-            continue;
-        };
-        let pixel = f64::from(extent) / TILE_PIXELS;
-        let mesh = match below {
-            0 => Mesh::weld(view.surfaces.iter().copied(), &points),
-            1 => {
-                let z = tile.width() / TILE_PIXELS / z_step.metres();
-                let cell = [pixel, pixel, z].map(|c| c * LOD2_CELL_PIXELS);
-                cluster(&view.surfaces, &points, cell)
-            }
-            _ if below < MERGE_BELOW => block(&view.surfaces, &points, pixel, BLOCK_MIN_PIXELS),
-            _ => {
-                let Some(footprint) = Footprint::new(&view.surfaces, &points) else {
-                    continue;
-                };
-                if f64::from(footprint.top()) * z_step.metres() < LANDMARK_MIN_METRES {
-                    placed.push((tile, Placed::Footprint(footprint)));
-                    continue;
-                }
-                block(&view.surfaces, &points, pixel, 0.0)
-            }
-        };
-        let metres = tile.width() / f64::from(extent);
-        let (error, parts) = match below {
-            0 => (HIGHEST_ERROR_METRES, Parts::Seamed),
-            1 => (ERROR_PIXELS * tile.width() / TILE_PIXELS, Parts::Seamed),
-            _ => (ERROR_PIXELS * tile.width() / TILE_PIXELS, Parts::Faced),
-        };
-        let mesh = mesh.and_then(|m| simplify(&m, [metres, metres, z_step.metres()], error, parts));
-        if let Some(mesh) = mesh.filter(|m| !m.triangles.is_empty()) {
-            placed.push((tile, Placed::Mesh(mesh)));
+fn place(building: &Building, zoom: u8, max_zoom: u8, z_step: ZStep) -> Option<(Tile, Placed)> {
+    let below = max_zoom - zoom;
+    let lods = if below == 0 {
+        Lods::Lod2
+    } else {
+        Lods::Highest
+    };
+    let view = View::new(building.surfaces.iter().filter(|s| s.lods != lods))?;
+    let tile = Tile::of(view.centre, zoom);
+    let extent = tile.extent();
+    let points = view.points(tile, extent, z_step)?;
+    let pixel = f64::from(extent) / TILE_PIXELS;
+    let mesh = match below {
+        0 => Mesh::weld(view.surfaces.iter().copied(), &points),
+        1 => {
+            let z = tile.width() / TILE_PIXELS / z_step.metres();
+            let cell = [pixel, pixel, z].map(|c| c * LOD2_CELL_PIXELS);
+            cluster(&view.surfaces, &points, cell)
         }
-    }
-    placed
+        _ if below < MERGE_BELOW => block(&view.surfaces, &points, pixel, BLOCK_MIN_PIXELS),
+        _ => {
+            let footprint = Footprint::new(&view.surfaces, &points)?;
+            if f64::from(footprint.top()) * z_step.metres() < LANDMARK_MIN_METRES {
+                return Some((tile, Placed::Footprint(footprint)));
+            }
+            block(&view.surfaces, &points, pixel, 0.0)
+        }
+    };
+    let metres = tile.width() / f64::from(extent);
+    let (error, parts) = match below {
+        0 => (HIGHEST_ERROR_METRES, Parts::Seamed),
+        1 => (ERROR_PIXELS * tile.width() / TILE_PIXELS, Parts::Seamed),
+        _ => (ERROR_PIXELS * tile.width() / TILE_PIXELS, Parts::Faced),
+    };
+    let mesh = simplify(&mesh?, [metres, metres, z_step.metres()], error, parts)?;
+    (!mesh.triangles.is_empty()).then_some((tile, Placed::Mesh(mesh)))
 }
 
 /// Some surfaces of a building, the centre of their bounding box in Web Mercator units of

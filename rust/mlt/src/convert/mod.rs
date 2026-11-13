@@ -559,7 +559,7 @@ pub fn convert(args: &ConvertArgs) -> AnyResult<()> {
     let input_container = args.input_container();
     let output_container = args.output_container();
     let geojson_input = is_geojson(&args.input);
-    let citygml_input = !geojson_input && from_citygml::is_citygml(&args.input);
+    let citygml_input = !geojson_input && from_citygml::is_citygml(&args.input)?;
     let geojson_only = [
         ("--min-zoom", args.min_zoom.is_some()),
         ("--max-zoom", args.max_zoom.is_some()),
@@ -595,7 +595,7 @@ pub fn convert(args: &ConvertArgs) -> AnyResult<()> {
         }
     } else if let Some((flag, _)) = geojson_only.iter().find(|(_, given)| *given) {
         bail!(
-            "{flag} tiles a GeoJSON input, but the input is not a .geojson file: {}",
+            "{flag} tiles a GeoJSON or CityGML input, but the input is neither a .geojson file nor CityGML: {}",
             args.input.display()
         );
     }

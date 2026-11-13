@@ -157,7 +157,6 @@ fn lod_tag(name: &[u8]) -> Option<Tag> {
 pub fn parse(bytes: &[u8]) -> AnyResult<Document> {
     let mut parser = Parser::default();
     let mut reader = Reader::from_reader(bytes);
-    reader.config_mut().check_end_names = false;
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => parser.start(&e),
@@ -167,7 +166,9 @@ pub fn parse(bytes: &[u8]) -> AnyResult<Document> {
             }
             Ok(Event::End(_)) => parser.end(),
             Ok(Event::Text(t)) if parser.in_coordinates => {
-                parse_numbers(t.as_bytes(), &mut parser.numbers);
+                if !parse_numbers(t.as_bytes(), &mut parser.numbers) {
+                    parser.unreadable = true;
+                }
             }
             Ok(Event::Eof) => return Ok(parser.document),
             Ok(_) => {}
@@ -193,7 +194,12 @@ struct Parser {
     /// The semantic surface of the innermost surface or owner, `None` for an owner.
     semantics: Vec<Option<Part>>,
     in_coordinates: bool,
-    two_d: bool,
+    /// The `srsDimension` of the polygon being read, which its rings and positions may override.
+    polygon_dimension: Option<String>,
+    /// The `srsDimension` of the ring being read.
+    dimension: Option<String>,
+    /// Whether a coordinate of the ring is not a finite number.
+    unreadable: bool,
     numbers: Vec<f64>,
     points: Vec<[f64; 3]>,
     ends: Vec<usize>,
@@ -249,15 +255,18 @@ impl Parser {
                 self.points = Vec::new();
                 self.ends = Vec::new();
                 self.polygon_ok = true;
+                self.polygon_dimension = attribute(e, b"srsDimension");
             }
             Tag::Ring => {
                 self.numbers.clear();
-                self.two_d = false;
+                self.unreadable = false;
+                self.dimension =
+                    attribute(e, b"srsDimension").or_else(|| self.polygon_dimension.clone());
             }
             Tag::Coordinates => {
                 self.in_coordinates = true;
-                if attribute(e, b"srsDimension").is_some_and(|d| d.trim() != "3") {
-                    self.two_d = true;
+                if let Some(dimension) = attribute(e, b"srsDimension") {
+                    self.dimension = Some(dimension);
                 }
             }
             _ => {}
@@ -292,7 +301,8 @@ impl Parser {
     fn end_ring(&mut self) {
         let interior = self.stack.last() == Some(&Tag::Interior);
         let start = self.points.len();
-        if !self.two_d && self.numbers.len().is_multiple_of(3) {
+        let three_d = self.dimension.as_deref().is_none_or(|d| d.trim() == "3");
+        if three_d && !self.unreadable && self.numbers.len().is_multiple_of(3) {
             for c in self.numbers.as_chunks::<3>().0 {
                 let p = [c[0], c[1], c[2]];
                 if self.points.len() == start || self.points.last() != Some(&p) {
@@ -383,15 +393,22 @@ impl Parser {
     }
 }
 
-/// Appends the numbers of `text`, separated by whitespace or commas, to `out`; others are skipped.
-fn parse_numbers(text: &[u8], out: &mut Vec<f64>) {
+/// Appends the numbers of `text`, separated by whitespace or commas, to `out`, or says that
+/// one of them is not a finite number.
+fn parse_numbers(text: &[u8], out: &mut Vec<f64>) -> bool {
     let Ok(text) = std::str::from_utf8(text) else {
-        return;
+        return false;
     };
-    out.extend(
-        text.split(|c: char| c.is_ascii_whitespace() || c == ',')
-            .filter_map(|s| s.parse::<f64>().ok()),
-    );
+    for token in text
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|s| !s.is_empty())
+    {
+        match token.parse::<f64>() {
+            Ok(v) if v.is_finite() => out.push(v),
+            _ => return false,
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -554,13 +571,41 @@ mod tests {
     #[test]
     fn numbers_are_split_by_whitespace_and_commas() {
         let mut out = Vec::new();
-        parse_numbers(b" 1.5,2\n-3e2 x 4", &mut out);
+        assert!(parse_numbers(b" 1.5,2\n-3e2  4", &mut out));
         assert_eq!(out, [1.5, 2.0, -300.0, 4.0]);
+    }
+
+    #[test]
+    fn a_token_that_is_not_a_finite_number_spoils_the_text() {
+        for text in [&b"1 2 x 3"[..], b"1 2 NaN", b"1 inf 3"] {
+            assert!(!parse_numbers(text, &mut Vec::new()), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_ring_with_an_unreadable_coordinate_or_a_2d_polygon_is_left_out() {
+        let shifted = "<gml:Polygon><gml:exterior><gml:LinearRing><gml:posList>\
+                       0 0 10 x 10 0 10 10 10 10 0 10 10 0 0 10</gml:posList></gml:LinearRing>\
+                       </gml:exterior></gml:Polygon>";
+        let flat = "<gml:Polygon srsDimension=\"2\"><gml:exterior><gml:LinearRing><gml:posList>\
+                    0 0 1 0 1 1 0 1 0 0 1 0</gml:posList></gml:LinearRing></gml:exterior></gml:Polygon>";
+        let xml = format!(
+            "{HEAD}<bldg:Building>{}{}</bldg:Building></core:CityModel>",
+            surface("WallSurface", 2, shifted),
+            surface("WallSurface", 2, flat),
+        );
+        assert_eq!(parse(xml.as_bytes()).unwrap().buildings, []);
     }
 
     #[test]
     fn broken_xml_fails_with_its_position() {
         let err = parse(b"<a><b></a").unwrap_err();
+        assert!(err.to_string().starts_with("invalid XML at byte"), "{err}");
+    }
+
+    #[test]
+    fn a_mismatched_end_tag_is_broken_xml() {
+        let err = parse(b"<a><b></c></a>").unwrap_err();
         assert!(err.to_string().starts_with("invalid XML at byte"), "{err}");
     }
 }
