@@ -26,7 +26,10 @@ export {
   type MltGeometryColumns2D,
   type MltGeometryColumns3D,
   MltGeometryType,
+  type MltMValueColumn,
+  type MltMValueScope,
   type MltNamedColumn,
+  type MltZDatum,
   toElevation,
 } from "./columns";
 export {
@@ -35,6 +38,7 @@ export {
   type MltFeatureGeometry,
   type MltGeometryStarts,
   type MltLineGeometry,
+  type MltMeshGeometry,
   type MltPointGeometry,
   type MltPolygonGeometry,
   type MltPolygonRings,

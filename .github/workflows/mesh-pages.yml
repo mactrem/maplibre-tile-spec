@@ -1,0 +1,79 @@
+name: Publish the meshes viewer
+
+# Deploys mlt-wasm/viewer/meshes.html with a CityGML extract tiled by `mlt convert`, so that a
+# reviewer of the Meshes layout can open it, or with all of Hamburg where the repository has a
+# release holding that archive. Pages of the repository must be set to deploy from
+# GitHub Actions, and its github-pages environment must allow this branch.
+
+on:
+  push:
+    branches: [ spec-mesh-converter-final ]
+  workflow_dispatch:
+    inputs:
+      gml:
+        description: 'CityGML file or directory to tile, relative to rust/; empty shows the Hamburg release, if any'
+        default: ''
+
+permissions: {}
+
+# A deployment cut short can leave Pages half published, so a newer run waits for it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+
+      - uses: ./.github/actions/mlt-setup-rust
+        with: { toolchain: nightly }
+      - run: rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
+      - uses: ./.github/actions/mlt-setup-node
+
+      - name: Build the site
+        env:
+          GML: ${{ inputs.gml || '../test/fixtures/meshes/buildings.gml' }}
+        run: just -v rust::mesh-site "$GML" target/mesh-site
+
+      # Too large for the repository, the archive is an asset of a release of it, which a fork may have
+      - name: Show the Hamburg archive instead, if the repository has a release of it
+        if: inputs.gml == ''
+        working-directory: rust/target/mesh-site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: hamburg-lod-data
+          ARCHIVE: hamburg_v3_lod_v5.pmtiles
+          SHA256: 2cd6b9afcf0a89cdd5573878aee19ea4bdcc25a74c5883315c429bb021baf624
+          ATTRIBUTION: >-
+            Buildings: Freie und Hansestadt Hamburg, Landesbetrieb Geoinformation und Vermessung (LGV),
+            3D-Gebäudemodell LoD3.0-HH https://suche.transparenz.hamburg.de/dataset/3d-gebaeudemodell-lod3-0-hh-hamburg17
+            · dl-de/by-2-0 https://www.govdata.de/dl-de/by-2-0
+            · changed: tiled by mlt convert, and simplified
+        run: |
+          if ! gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" > /dev/null; then
+            echo "No release $RELEASE, so the site shows the extract"
+            exit 0
+          fi
+          gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern "$ARCHIVE"
+          echo "$SHA256  $ARCHIVE" | sha256sum -c
+          attribution=$(jq -rn --arg text "$ATTRIBUTION" '$text | @uri')
+          printf '<!doctype html><meta http-equiv="refresh" content="0; url=viewer/meshes.html?url=../%s&amp;attribution=%s">\n' \
+            "$ARCHIVE" "$attribution" > index.html
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with: { path: rust/target/mesh-site }
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: { pages: write, id-token: write }
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

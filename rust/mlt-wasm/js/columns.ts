@@ -8,6 +8,8 @@ export enum MltGeometryType {
   MultiPoint = 3,
   MultiLineString = 4,
   MultiPolygon = 5,
+  /** `(x, y, z)` vertices and the triangles between them, only in a v2 `Meshes` layer. */
+  Mesh = 6,
 }
 
 /**
@@ -71,11 +73,23 @@ interface MltGeometryColumnsBase {
    * A polygon ring's closing vertex is not stored.
    */
   readonly vertices: Int32Array;
-  /** Cumulative triangle counts per polygon feature, for a tessellated layer. */
+  /**
+   * Cumulative triangle counts per polygon feature, for a tessellated layer, or per feature
+   * of a `Meshes` layer.
+   */
   readonly triangleOffsets?: Uint32Array;
   /** Three vertex indices per triangle, counted from the layer's first vertex. */
   readonly indexBuffer?: Uint32Array;
+  /** Set on a `Meshes` layer, which says so even when it holds no feature. */
+  readonly meshes?: true;
 }
+
+/**
+ * What a 3D layer's `z = 0` stands for: Terrain-RGB's base of -10000 m, so `z` is an
+ * elevation, or the ground, so `z` is a height above it, which only a `Meshes` layer uses. A
+ * mesh's ground is the terrain at the centre of its `(x, y)` bounding box.
+ */
+export type MltZDatum = "elevation" | "ground";
 
 /** `(x, y)` vertices. */
 export interface MltGeometryColumns2D extends MltGeometryColumnsBase {
@@ -88,7 +102,42 @@ export interface MltGeometryColumns3D extends MltGeometryColumnsBase {
   readonly dimension: 3;
   /** The z grid as the power of ten of its step in metres; `toElevation` gives a z in metres. */
   readonly zStep: number;
+  readonly zDatum: MltZDatum;
 }
+
+/**
+ * What an m-value column runs over: the vertices, or, in a `Meshes` layer, the triangles.
+ */
+export type MltMValueScope = "vertex" | "triangle";
+
+/**
+ * An m-value column of a v2 layer. A `"vertex"`-scoped column's values run over the vertices of
+ * the features that carry it, in feature order: when `present` is left out, that is one value
+ * per vertex of the layer, aligned with `geometry.vertices`. A `"triangle"`-scoped column of a
+ * `Meshes` layer runs over the triangles the same way, aligned with `geometry.indexBuffer`
+ * three indices per value. `present` has one bit per feature, LSB-first; a feature whose bit is
+ * clear carries no values at all.
+ *
+ * A string column comes as one dictionary code per value, and `dictionary[code]` is the string.
+ */
+export type MltMValueColumn =
+  | {
+      [T in Exclude<MltColumnType, "string">]: {
+        readonly name: string;
+        readonly scope: MltMValueScope;
+        readonly type: T;
+        readonly values: MltColumnValuesByType[T];
+        readonly present?: Uint8Array;
+      };
+    }[Exclude<MltColumnType, "string">]
+  | {
+      readonly name: string;
+      readonly scope: MltMValueScope;
+      readonly type: "string";
+      readonly codes: Uint32Array;
+      readonly dictionary: readonly string[];
+      readonly present?: Uint8Array;
+    };
 
 export interface MltColumnLayer {
   readonly name: string;
@@ -101,9 +150,11 @@ export interface MltColumnLayer {
   readonly ids?: MltColumn<Float64Array>;
   /**
    * In wire order, a shared dictionary's children named by its prefix and their own names.
-   * v2 vertex-scoped (m-value) and nested columns are not passed on.
+   * v2 nested columns are not passed on.
    */
   readonly properties: readonly MltNamedColumn[];
+  /** A v2 layer's m-value columns, in wire order; left out for a v1 layer. */
+  readonly mValues?: readonly MltMValueColumn[];
 }
 
 export interface MltColumnTile {
@@ -148,10 +199,16 @@ export function columnValue<C extends MltColumn>(
 }
 
 /**
- * A z of a 3D layer in metres, `-10000 + z * 10 ** zStep`, as mlt-core's `ZStep::elevation`:
- * a fine grid divides last, so `1001234` on the `-2` grid is exactly `12.34`.
+ * A z of a 3D layer in metres, as mlt-core's `ZStep::elevation`: `-10000 + z * 10 ** zStep` on
+ * the `"elevation"` datum, and `z * 10 ** zStep` above the ground. A fine grid divides last,
+ * so `1001234` on the `-2` grid is exactly `12.34`.
  */
-export function toElevation(z: number, zStep: number): number {
+export function toElevation(
+  z: number,
+  zStep: number,
+  zDatum: MltZDatum = "elevation",
+): number {
+  const base = zDatum === "ground" ? 0 : 10000;
   const power = 10 ** Math.abs(zStep);
-  return zStep < 0 ? (z - 10000 * power) / power : -10000 + z * power;
+  return zStep < 0 ? (z - base * power) / power : -base + z * power;
 }
