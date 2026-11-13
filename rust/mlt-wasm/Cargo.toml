@@ -32,6 +32,7 @@ unstable-v2 = []
 js-sys.workspace = true
 minicov = { workspace = true, optional = true }
 mlt-core = { workspace = true, features = ["unstable-v2"] }
+rustc-hash.workspace = true
 serde = { workspace = true, optional = true }
 serde-wasm-bindgen = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

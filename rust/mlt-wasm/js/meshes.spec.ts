@@ -4,11 +4,12 @@ import { describe, expect, it } from "vitest";
 import {
   decodeTileColumns,
   type MltColumnLayer,
+  type MltGeometryColumns,
   MltGeometryType,
   type MltMValueColumn,
   toElevation,
 } from "./columns";
-import { featureGeometry } from "./featureGeometry";
+import { featureGeometry, geometryStarts, isMeshes, isTrianglesOnly } from "./featureGeometry";
 import { tileGeoJson } from "./geojson";
 import { decodeTile3D } from "./vectorTile";
 
@@ -21,17 +22,19 @@ const TILES = readdirSync(fileURLToPath(MESHES), { recursive: true })
   .sort();
 
 type Xyz = [number, number, number];
+/** A triangle's three vertex indices. */
+type Tri = [number, number, number];
 
 /** A mesh feature as `tileGeoJson` writes it, through mlt-core's rows rather than its columns. */
 interface MeshFeature {
   id: number;
   properties: { gml_id: string; "m:part": string[] };
   geometry: { type: "MultiPoint"; coordinates: Xyz[] };
-  triangles: Xyz[];
+  triangles: Tri[];
 }
 
-function triples(words: ArrayLike<number>): Xyz[] {
-  const out: Xyz[] = [];
+function triples(words: ArrayLike<number>): [number, number, number][] {
+  const out: [number, number, number][] = [];
   for (let i = 0; i < words.length; i += 3) out.push([words[i], words[i + 1], words[i + 2]]);
   return out;
 }
@@ -66,6 +69,7 @@ describe("the mesh tiles", () => {
         "ground",
       ]);
       expect([...geometry.types]).toEqual(expected.map(() => MltGeometryType.Mesh));
+      expect(geometry.meshes).toBe(true);
     });
 
     it("has every feature's vertices and triangles", () => {
@@ -100,6 +104,26 @@ describe("the mesh tiles", () => {
         expect(triples(decoded.loadTriangles())).toEqual(feature.triangles);
       });
     });
+  });
+});
+
+describe("a Meshes layer without features", () => {
+  const geometry: MltGeometryColumns = {
+    types: new Uint8Array(0),
+    dimension: 3,
+    zStep: -2,
+    zDatum: "ground",
+    meshes: true,
+    geometryOffsets: new Uint32Array([0]),
+    triangleOffsets: new Uint32Array([0]),
+    indexBuffer: new Uint32Array(0),
+    vertices: new Int32Array(0),
+  };
+
+  it("is still a Meshes layer, not a TessPolygons one", () => {
+    expect(isMeshes(geometry)).toBe(true);
+    expect(isTrianglesOnly(geometry)).toBe(false);
+    expect(() => geometryStarts(geometry)).not.toThrow();
   });
 });
 

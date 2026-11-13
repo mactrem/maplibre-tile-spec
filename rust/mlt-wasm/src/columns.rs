@@ -5,9 +5,6 @@
 //! Every array is copied out of WASM memory once: a view into it would be detached the next
 //! time that memory grows.
 
-#[cfg(feature = "unstable-v2")]
-use std::collections::HashMap;
-
 use js_sys::{
     Array, Float32Array, Float64Array, Int8Array, Int32Array, Object, Reflect, Uint8Array,
     Uint32Array,
@@ -18,6 +15,8 @@ use mlt_core::{
 };
 #[cfg(feature = "unstable-v2")]
 use mlt_core::{MValueScope, MValues, ParsedMValue};
+#[cfg(feature = "unstable-v2")]
+use rustc_hash::FxHashMap;
 use wasm_bindgen::prelude::*;
 
 use crate::to_js_err;
@@ -56,6 +55,12 @@ pub fn decode_tile_columns(data: &[u8], names: Option<Vec<String>>) -> Result<Ar
             #[cfg(feature = "unstable-v2")]
             ParsedLayer::Tag02(layer) => {
                 let object = layer_object(layer.layer(), 2)?;
+                if layer.layout().geometry == mlt_core::wire::GeoLayout::Meshes {
+                    let geometry: Object = Reflect::get(&object, &"geometry".into())
+                        .map_err(|_| JsError::new("a layer without its geometry"))?
+                        .unchecked_into();
+                    set(&geometry, "meshes", &true.into());
+                }
                 let m_values = layer
                     .m_values()
                     .iter()
@@ -180,32 +185,17 @@ fn m_value_column(column: &ParsedMValue<'_>, feature_count: usize) -> Object {
     object
 }
 
-/// A string column as codes into its distinct values, `""` standing in for a null: a renderer
-/// evaluates a style once per distinct value. A dictionary-coded column passes its codes on as
-/// decoded, its nulls then coded as its `""` entry, added if it has none.
+/// A string m-value column as codes into its distinct values: a renderer evaluates a style once
+/// per distinct value. A dictionary-coded column passes its codes on as decoded.
+///
+/// A null is a whole feature's, held by the column's presence, so no single value is null.
 #[cfg(feature = "unstable-v2")]
 fn string_codes(strings: &ParsedStrings<'_>) -> (Uint32Array, Array) {
     if let Some((entries, codes)) = strings.dictionary() {
         let dictionary: Array = entries.map(JsValue::from_str).collect();
-        if !codes.contains(&ParsedStrings::NULL_CODE) {
-            return (Uint32Array::from(codes), dictionary);
-        }
-        let empty = JsValue::from_str("");
-        let null = u32::try_from(dictionary.index_of(&empty, 0))
-            .unwrap_or_else(|_| dictionary.push(&empty) - 1);
-        let codes: Vec<u32> = codes
-            .iter()
-            .map(|&code| {
-                if code == ParsedStrings::NULL_CODE {
-                    null
-                } else {
-                    code
-                }
-            })
-            .collect();
-        return (Uint32Array::from(&codes[..]), dictionary);
+        return (Uint32Array::from(codes), dictionary);
     }
-    let mut entries: HashMap<&str, u32> = HashMap::new();
+    let mut entries: FxHashMap<&str, u32> = FxHashMap::default();
     let dictionary = Array::new();
     let codes: Vec<u32> = (0..strings.feature_count())
         .map(|i| {

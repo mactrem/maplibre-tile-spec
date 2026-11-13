@@ -78,6 +78,9 @@ export interface MltPolygonRings extends MltVertexRun {
 const polygonOrdinals = new WeakMap<MltGeometryColumns, Uint32Array>();
 
 function polygonOrdinal(geometry: MltGeometryColumns, index: number): number {
+  if (isMeshes(geometry)) {
+    return index;
+  }
   let ordinals = polygonOrdinals.get(geometry);
   if (!ordinals) {
     const { types } = geometry;
@@ -119,7 +122,7 @@ export function isTrianglesOnly(geometry: MltGeometryColumns): boolean {
  * run of vertices, as a `MultiPoint` layer's are.
  */
 export function isMeshes(geometry: MltGeometryColumns): boolean {
-  return geometry.types[0] === MltGeometryType.Mesh;
+  return geometry.meshes === true || geometry.types[0] === MltGeometryType.Mesh;
 }
 
 /** Item `i` of an offset level, or `i` itself when the layer has no such level. */

@@ -21,8 +21,8 @@ pub struct Layer02<'a, S: DecodeState = Lazy> {
     pub(crate) layer: Layer01<'a, S>,
     /// Nested columns, each a tree over the features it marks present.
     pub(crate) nested: Vec<Nested<'a, S>>,
-    /// Vertex-scoped columns, each running over every vertex of every feature
-    /// it marks present.
+    /// M-value columns, each running over every vertex, or every mesh triangle, of every
+    /// feature it marks present.
     pub(crate) m_values: Vec<MValueColumn<'a, S>>,
     /// The layer layout byte as parsed. Decoding resolves all three of its fields
     /// away, so it is kept for tools reporting on how a tile is stored.

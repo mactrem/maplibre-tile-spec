@@ -80,6 +80,8 @@ interface MltGeometryColumnsBase {
   readonly triangleOffsets?: Uint32Array;
   /** Three vertex indices per triangle, counted from the layer's first vertex. */
   readonly indexBuffer?: Uint32Array;
+  /** Set on a `Meshes` layer, which says so even when it holds no feature. */
+  readonly meshes?: true;
 }
 
 /**
