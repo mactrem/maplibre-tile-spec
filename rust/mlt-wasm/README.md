@@ -15,6 +15,7 @@ mlt-wasm/
 │   ├── annotate.ts    # annotated-dump wire contract
 │   ├── columns.ts     # typed-array layers, as decoded
 │   └── vectorTile.ts  # VectorTileLike wrapper over columns.ts
+├── viewer/meshes.html # three.js viewer of v2 Meshes tiles
 ├── pkg/               # wasm-pack output (gitignored)
 ├── dist/              # tsc output (gitignored)
 ├── Cargo.toml
@@ -220,6 +221,23 @@ for (const [name, layer] of Object.entries(tile.layers)) {
     }
 }
 ```
+
+### Meshes viewer
+
+`viewer/meshes.html` draws the v2 `Meshes` layers of a `.pmtiles` archive or of a directory of
+`z/x/y.mlt` tiles. As on a pitched map, it draws the tiles near the camera at the highest zoom and
+the farther ones at lower zooms, within a triangle budget that its Detail setting picks: high,
+phone, the default on phones, or low-end phone, with a fifth of the phone's triangles and tiles
+two zooms lower near the camera. It tints each
+tile by the level of detail `mlt convert` writes at its zoom, and fades the far tiles into a fog
+that a slider thickens, which also draws fewer tiles, as none is drawn past where it turns opaque.
+Build it with
+`npm run build:web`, which writes `pkg-web/` without the `annotate` and `geojson` features, serve
+this directory and open
+`viewer/meshes.html?tiles=<base>` or `viewer/meshes.html?url=<archive>`, adding
+`&attribution=<text>` to credit the data and `&quality=high`, `phone` or `low` to pick the
+detail. `just rust::mesh-site`
+builds the same as a static site over a `CityGML` input.
 
 ## Annotate
 
