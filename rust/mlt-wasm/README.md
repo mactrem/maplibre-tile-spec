@@ -15,6 +15,7 @@ mlt-wasm/
 │   ├── annotate.ts    # annotated-dump wire contract
 │   ├── columns.ts     # typed-array layers, as decoded
 │   └── vectorTile.ts  # VectorTileLike wrapper over columns.ts
+├── viewer/meshes.html # three.js viewer of v2 Meshes tiles
 ├── pkg/               # wasm-pack output (gitignored)
 ├── dist/              # tsc output (gitignored)
 ├── Cargo.toml
@@ -38,7 +39,9 @@ npm run build:ts
 ```
 
 The `unstable-v2` feature is on by default, so v2 layers decode. Building with
-`--no-default-features` skips them.
+`--no-default-features` skips them. The `annotate` and `geojson` features, also on by default,
+export `annotateTile` and `tileGeoJson`. A renderer that only calls `decodeTileColumns` can leave
+them out, `--no-default-features --features unstable-v2`, for a WASM file a third smaller.
 
 ## Usage
 
@@ -51,7 +54,7 @@ const tile = decodeTile(data);
 for (const [name, layer] of Object.entries(tile.layers)) {
     for (let i = 0; i < layer.length; i++) {
         const feature = layer.feature(i);
-        console.log(feature.type);           // 1 | 2 | 3
+        console.log(feature.type);           // 0 (Mesh) | 1 | 2 | 3
         console.log(feature.id);             // number | undefined
         console.log(feature.properties);     // read from the decoded columns
         console.log(feature.loadGeometry()); // Point[][]
@@ -78,7 +81,7 @@ for (const layer of decodeTileColumns(data).layers) {
             const value = columnValue(column, f); // undefined when feature f has no value
         }
     }
-    // v2 vertex-scoped (m-value) and nested columns are not passed on
+    // a v2 layer's m-value columns are in layer.mValues; nested columns are not passed on
 }
 ```
 
@@ -95,13 +98,24 @@ converts one z to metres, exactly as `mlt-core` does.
 Its `heightMode` says what a z of `0` stands for: `"absolute"` is mean sea level and
 `"relativeToGround"` the terrain under each vertex.
 
+A v2 layer's `mValues` hold its m-value columns, packed over the vertices or, in a `Meshes` layer,
+the triangles of the features whose `present` bit is set (absent features store zero items rather
+than `0`/`""` padding), with strings as dictionary codes; `mValueSlice(layer, column, f)` reads
+one feature's slice, and `MltFeature3D.loadMValues(name)` does the same on `decodeTile3D`.
+
+A `Meshes` layer's features are all `MltGeometryType.Mesh`: `geometryOffsets` starts each feature's
+run of vertices, and `triangleOffsets` each feature's triangles in the layer-wide `indexBuffer`.
+A mesh in the `"relativeToGround"` height mode meets the terrain at the centre of its vertices'
+`(x, y)` bounding box.
+
 ### Features
 
 `featureGeometry(layer, i)` reads feature `i` of a column layer without knowing the offset levels.
 Its points, lines and polygon rings are views of the layer's vertices, still in tile coordinates,
 and a polygon's rings come ready for earcut. A `TessPolygonsWithOutlines` layer's triangles come per
-feature, counted from the feature's own vertices. A `TessPolygons` layer stores triangles without
-outlines, so `featureGeometry` rejects it; its `indexBuffer` and `triangleOffsets` are the triangles.
+feature, counted from the feature's own vertices, and so do a mesh's (`kind: "mesh"`). A `TessPolygons`
+layer stores triangles without outlines, so `featureGeometry` rejects it; its `indexBuffer` and
+`triangleOffsets` are the triangles.
 
 ```ts
 import { featureGeometry } from '@maplibre/mlt-wasm';
@@ -182,25 +196,48 @@ Shapes that need tessellation on the CPU work one polygon or line at a time:
 
 `decodeTile3D` reads a tile whose every layer has z coordinates. Its features have the same
 `loadGeometry()` and `loadPolygons()`, with every vertex an `[x, y, z]` array, so the rest of the
-code can assume 3D. It throws when any layer has no z coordinates, for which `decodeTile` reads the
+code can assume 3D. A mesh's `loadGeometry()` is one ring of its vertices, and `loadTriangles()`
+indexes into it. It throws when any layer has no z coordinates, for which `decodeTile` reads the
 tile in 2D, and when any layer uses the `TessPolygons` or `TessPolygonsWithOutlines` geometry
 layout. `decodeTileColumns` reads every layout, in 2D and 3D.
 
 Like `x` and `y`, `z` is the stored integer: it lies on the layer's `zStep` grid, and
-`toElevation(z, layer.zStep)` gives its elevation in metres.
+`toElevation(z, layer.zStep)` gives it in metres above the layer's `heightMode` base.
 
 ```ts
-import { decodeTile3D } from '@maplibre/mlt-wasm';
+import { decodeTile3D, MltGeometryType } from '@maplibre/mlt-wasm';
 
 const tile = decodeTile3D(data);
 for (const [name, layer] of Object.entries(tile.layers)) {
     for (let i = 0; i < layer.length; i++) {
         const feature = layer.feature(i);
-        // exterior ring, then holes; each ring is closed (its first vertex is repeated at the end)
-        const polygons = feature.loadPolygons(); // [x, y, z][][][]
+        if (feature.mltType === MltGeometryType.Mesh) {
+            const vertices = feature.loadGeometry()[0]; // [x, y, z][]
+            const triangles = feature.loadTriangles();  // Uint32Array
+        } else {
+            // exterior ring, then holes; each ring is closed (its first vertex is repeated at the end)
+            const polygons = feature.loadPolygons();    // [x, y, z][][][]
+        }
     }
 }
 ```
+
+### Meshes viewer
+
+`viewer/meshes.html` draws the v2 `Meshes` layers of a `.pmtiles` archive or of a directory of
+`z/x/y.mlt` tiles. As on a pitched map, it draws the tiles near the camera at the highest zoom and
+the farther ones at lower zooms, within a triangle budget that its Detail setting picks: high,
+phone, the default on phones, or low-end phone, with a fifth of the phone's triangles and tiles
+two zooms lower near the camera. It tints each
+tile by the level of detail `mlt convert` writes at its zoom, and fades the far tiles into a fog
+that a slider thickens, which also draws fewer tiles, as none is drawn past where it turns opaque.
+Build it with
+`npm run build:web`, which writes `pkg-web/` without the `annotate` and `geojson` features, serve
+this directory and open
+`viewer/meshes.html?tiles=<base>` or `viewer/meshes.html?url=<archive>`, adding
+`&attribution=<text>` to credit the data and `&quality=high`, `phone` or `low` to pick the
+detail. `just rust::mesh-site`
+builds the same as a static site over a `CityGML` input.
 
 ## Annotate
 
