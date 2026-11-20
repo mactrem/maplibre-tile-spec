@@ -107,6 +107,6 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`MLT JS viewer running at:`);
   console.log(`  http://localhost:${PORT}/js/viewer/meshes.html`);
   console.log(
-    `  http://localhost:${PORT}/js/viewer/meshes.html?url=/rust/hamburg_v3_lod_v7.pmtiles`,
+    `  http://localhost:${PORT}/js/viewer/meshes.html?url=/rust/hamburg_demo.pmtiles`,
   );
 });

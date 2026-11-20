@@ -48,8 +48,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE: hamburg-lod-data
-          ARCHIVE: hamburg_v3_lod_v7.pmtiles
-          SHA256: acf3fb24498e92656a641f863b9689249ac9a22d006fcb2ed68a57327a83e25f
+          ARCHIVE: hamburg_demo.pmtiles
+          SHA256: 63159b945091c6e8ce93ac07331e15d073471fa3c5df9eb2c533f6aee57386f9
           ATTRIBUTION: >-
             Buildings: Freie und Hansestadt Hamburg, Landesbetrieb Geoinformation und Vermessung (LGV),
             3D-Gebäudemodell LoD3.0-HH https://suche.transparenz.hamburg.de/dataset/3d-gebaeudemodell-lod3-0-hh-hamburg17
