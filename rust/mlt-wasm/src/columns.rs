@@ -10,9 +10,13 @@ use js_sys::{
     Uint32Array,
 };
 use mlt_core::{
-    Decoder, GeometryValues, HeightMode, ParsedLayer, ParsedLayer01, ParsedProperty, ParsedStrings,
-    Parser, PresentValues, PropKind,
+    Decoder, GeometryValues, ParsedLayer, ParsedLayer01, ParsedProperty, ParsedStrings, Parser,
+    PresentValues, PropKind,
 };
+#[cfg(feature = "unstable-v2")]
+use mlt_core::{HeightMode, MValueScope, MValues, ParsedMValue};
+#[cfg(feature = "unstable-v2")]
+use rustc_hash::FxHashMap;
 use wasm_bindgen::prelude::*;
 
 use crate::to_js_err;
@@ -46,10 +50,20 @@ pub fn decode_tile_columns(data: &[u8], names: Option<Vec<String>>) -> Result<Ar
         let parsed = raw_layer.decode_all(&mut dec).map_err(|e| to_js_err(&e))?;
         // `ParsedLayer` is non_exhaustive: a layer of a tag this binding does not know is skipped.
         let object = match &parsed {
-            ParsedLayer::Tag01(layer) => layer_object(layer, 1)?,
-            // A v2 layer's vertex-scoped and nested columns are not passed on.
+            ParsedLayer::Tag01(layer) => layer_object(layer, 1, false)?,
+            // A v2 layer's nested columns are not passed on.
             #[cfg(feature = "unstable-v2")]
-            ParsedLayer::Tag02(layer) => layer_object(layer.layer(), 2)?,
+            ParsedLayer::Tag02(layer) => {
+                let is_meshes = layer.layout().geometry == mlt_core::wire::GeoLayout::Meshes;
+                let object = layer_object(layer.layer(), 2, is_meshes)?;
+                let m_values = layer
+                    .m_values()
+                    .iter()
+                    .map(|column| m_value_column(column, layer.layer().feature_count()))
+                    .collect::<Array>();
+                set(&object, "mValues", &m_values);
+                object
+            }
             _ => continue,
         };
         layers.push(&object);
@@ -58,7 +72,11 @@ pub fn decode_tile_columns(data: &[u8], names: Option<Vec<String>>) -> Result<Ar
 }
 
 /// The columns every wire version has.
-fn layer_object(layer: &ParsedLayer01<'_>, version: u8) -> Result<Object, JsError> {
+fn layer_object(
+    layer: &ParsedLayer01<'_>,
+    version: u8,
+    is_meshes: bool,
+) -> Result<Object, JsError> {
     let object = Object::new();
     set(&object, "name", &layer.name().into());
     set(&object, "extent", &layer.extent().get().into());
@@ -67,7 +85,7 @@ fn layer_object(layer: &ParsedLayer01<'_>, version: u8) -> Result<Object, JsErro
     set(
         &object,
         "geometry",
-        &geometry_object(layer.geometry_values()),
+        &geometry_object(layer.geometry_values(), is_meshes),
     );
     if let Some(ids) = layer.id() {
         let (values, present) = scalar(ids);
@@ -95,7 +113,7 @@ fn layer_object(layer: &ParsedLayer01<'_>, version: u8) -> Result<Object, JsErro
     Ok(object)
 }
 
-fn geometry_object(geometry: &GeometryValues) -> Object {
+fn geometry_object(geometry: &GeometryValues, is_meshes: bool) -> Object {
     let object = Object::new();
     let types: Vec<u8> = geometry.vector_types().iter().map(|&t| t as u8).collect();
     set(&object, "types", &Uint8Array::from(&types[..]));
@@ -105,6 +123,10 @@ fn geometry_object(geometry: &GeometryValues) -> Object {
         "vertices",
         &Int32Array::from(geometry.vertices().unwrap_or_default()),
     );
+    if is_meshes {
+        set(&object, "meshes", &true.into());
+    }
+    #[cfg(feature = "unstable-v2")]
     if let Some(axis) = geometry.z_axis() {
         set(&object, "zStep", &axis.step.exponent().into());
         let mode = match axis.mode {
@@ -125,6 +147,68 @@ fn geometry_object(geometry: &GeometryValues) -> Object {
         }
     }
     object
+}
+
+/// `{ name, scope, type, values, present? }`, or for strings
+/// `{ name, scope, type, codes, dictionary, present? }`.
+///
+/// The values run over the vertices of the features that carry the column, in feature order:
+/// with every feature present, one per vertex of the layer. A `"triangle"`-scoped column of a
+/// `Meshes` layer runs over the triangles instead, in the order of the index buffer.
+/// `present` is one bit per feature.
+#[cfg(feature = "unstable-v2")]
+fn m_value_column(column: &ParsedMValue<'_>, feature_count: usize) -> Object {
+    let object = Object::new();
+    set(&object, "name", &column.name().into());
+    let scope = match column.scope() {
+        MValueScope::Vertex => "vertex",
+        MValueScope::Triangle => "triangle",
+    };
+    set(&object, "scope", &scope.into());
+    set(&object, "type", &type_name(column.values().kind()).into());
+    match column.values() {
+        MValues::Bool(v) => set(&object, "values", &bool::js_array(v)),
+        MValues::I8(v) => set(&object, "values", &i8::js_array(v)),
+        MValues::U8(v) => set(&object, "values", &u8::js_array(v)),
+        MValues::I32(v) => set(&object, "values", &i32::js_array(v)),
+        MValues::U32(v) => set(&object, "values", &u32::js_array(v)),
+        MValues::I64(v) => set(&object, "values", &i64::js_array(v)),
+        MValues::U64(v) => set(&object, "values", &u64::js_array(v)),
+        MValues::F32(v) => set(&object, "values", &f32::js_array(v)),
+        MValues::F64(v) => set(&object, "values", &f64::js_array(v)),
+        MValues::Str(strings) => {
+            let (codes, dictionary) = string_codes(strings);
+            set(&object, "codes", &codes);
+            set(&object, "dictionary", &dictionary);
+        }
+    }
+    if let Some(present) = bitmap(feature_count, |i| column.is_present(i)) {
+        set(&object, "present", &present);
+    }
+    object
+}
+
+/// A string m-value column as codes into its distinct values: a renderer evaluates a style once
+/// per distinct value. A dictionary-coded column passes its codes on as decoded.
+///
+/// A null is a whole feature's, held by the column's presence, so no single value is null.
+#[cfg(feature = "unstable-v2")]
+fn string_codes(strings: &ParsedStrings<'_>) -> (Uint32Array, Array) {
+    if let Some((entries, codes)) = strings.dictionary() {
+        let dictionary: Array = entries.map(JsValue::from_str).collect();
+        return (Uint32Array::from(codes), dictionary);
+    }
+    let mut entries: FxHashMap<&str, u32> = FxHashMap::default();
+    let dictionary = Array::new();
+    let codes: Vec<u32> = (0..strings.feature_count())
+        .map(|i| {
+            let value = string_at(strings, i).unwrap_or("");
+            *entries
+                .entry(value)
+                .or_insert_with(|| dictionary.push(&JsValue::from_str(value)) - 1)
+        })
+        .collect();
+    (Uint32Array::from(&codes[..]), dictionary)
 }
 
 /// A column's type, its values, and its presence when some feature has no value.
